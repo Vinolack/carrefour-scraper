@@ -6,3 +6,4 @@ __pycache__/
 .env.local
 .env.*.local
 node_modules/
+scraper.log

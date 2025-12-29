@@ -109,13 +109,6 @@ def scrape_store_links(links):
 
     return product_links
 
-def extract_product_links(html):
-    # Use regex to find product links in the HTML source
-    pattern = r'https://www\.carrefour\.fr/p/[^\s"]+'
-    if not html:
-        return []
-    return re.findall(pattern, html)
-
 def main():
     exe_folder = get_exe_dir()
     excel_file_path = os.path.join(exe_folder, "..", "input_links.xlsx")
