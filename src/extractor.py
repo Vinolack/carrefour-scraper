@@ -11,7 +11,6 @@ from typing import Optional
 import configloader
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 1. 获取主 Logger (必须与 scraper.py 中定义的名称一致)
 logger = logging.getLogger('carrefour_scraper')
 
 c = configloader.config()
@@ -47,16 +46,25 @@ def remove_html_tags(text):
     clean = re.compile('<.*?>')
     return re.sub(clean, '', text).strip()
 
-# --- Robust Image Functions ---
+def format_price(val):
+    """格式化价格：使用点号分隔小数，并加上€符号"""
+    if val is None:
+        return ""
+    try:
+        # 确保转为 float
+        f_val = float(val)
+        return f"{f_val:.2f}€"
+    except (ValueError, TypeError):
+        return str(val)
+
+# --- Image Functions ---
 
 def download_image(url: str, timeout: int = 30) -> Optional[str]:
-    """下载图片到本地，包含详细的错误日志"""
     image_dir = "product_image"
     os.makedirs(image_dir, exist_ok=True)
     
     for attempt in range(MAX_RETRIES):
         try:
-            # 增加 verify=False 以防证书问题，设置 strict headers
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
@@ -97,10 +105,8 @@ def download_image(url: str, timeout: int = 30) -> Optional[str]:
     return None
 
 def upload_to_image_host(file_path: str) -> Optional[str]:
-    """上传图片到图床"""
     if not os.path.exists(file_path):
         return None
-    
     if os.path.getsize(file_path) == 0:
         return None
 
@@ -140,7 +146,6 @@ def upload_to_image_host(file_path: str) -> Optional[str]:
     return None
 
 def process_single_image(index, img_url):
-    """辅助函数：处理单张图片的下载与上传，用于线程池"""
     final_img = img_url.replace('p_FORMAT', 'p_1500x1500')
     uploaded_url = None
     local_path = None
@@ -160,20 +165,20 @@ def process_single_image(index, img_url):
     return index, uploaded_url
 
 def extract_product_details(html_content, product_url):
-    """
-    从商品详情页HTML中提取详细信息。
-    """
     data = {
         "Product URL": product_url,
         "Category": "", "Title": "", "Description": "",
         "Price": "", "Shipping Cost": "", "Brand": "", "EAN": "",
+        "Seller": "",
+        "more_seller1": "", "price1": "", "shipping1": "",
+        "more_seller2": "", "price2": "", "shipping2": "",
+        "more_seller3": "", "price3": "", "shipping3": "",
         "Image 1": "", "Image 2": "", "Image 3": "", "Image 4": "", "Image 5": ""
     }
 
     if not html_content:
         return data
 
-    # 1. 尝试从 URL 提取 EAN
     try:
         ean_match = re.search(r'-(\d+)$', product_url)
         ean = ean_match.group(1) if ean_match else None
@@ -183,7 +188,6 @@ def extract_product_details(html_content, product_url):
 
     state_data = None
     
-    # 2. 尝试提取并解析 JSON 数据
     try:
         marker = "window.__INITIAL_STATE__="
         start_idx = html_content.find(marker)
@@ -194,12 +198,9 @@ def extract_product_details(html_content, product_url):
             
             if script_end_idx != -1:
                 json_str = html_content[value_start:script_end_idx].strip()
-                # 去除末尾分号
                 if json_str.endswith(';'):
                     json_str = json_str[:-1]
                 
-                # [关键修复] 直接加载，不要进行 replace 替换
-                # 原来的 .replace('\\"', '"') 会破坏 JSON 结构，导致 Expecting ',' delimiter 错误
                 try:
                     state_data = json.loads(json_str)
                 except json.JSONDecodeError as e:
@@ -207,10 +208,10 @@ def extract_product_details(html_content, product_url):
     except Exception as e:
         logger.error(f"Error extracting JSON block for {product_url}: {e}")
 
-    # 3. 解析 JSON 数据填充字段
     if state_data:
         try:
             products_map = state_data.get('vuex', {}).get('analytics', {}).get('indexedEntities', {}).get('product', {})
+            
             if not ean or ean not in products_map:
                 if products_map:
                     ean = list(products_map.keys())[0]
@@ -220,6 +221,7 @@ def extract_product_details(html_content, product_url):
             attributes = product_info.get('attributes', {})
 
             if attributes:
+                # --- Basic Info ---
                 data['Title'] = attributes.get('title', '') or attributes.get('shortTitle', '')
                 data['Brand'] = attributes.get('brand', '')
                 
@@ -233,83 +235,137 @@ def extract_product_details(html_content, product_url):
                     cat_names = [c.get('label', '') for c in sorted_cats]
                     data['Category'] = " / ".join(cat_names)
 
-                # --- 图片处理 ---
+                # --- Images ---
                 img_paths = attributes.get('images', {}).get('paths', [])
                 target_imgs = img_paths[:5]
-                
                 if target_imgs:
                     for i, img_url in enumerate(target_imgs):
                         try:
-                            # 顺序调用，稳定第一
                             _, url = process_single_image(i, img_url)
                             if url:
                                 data[f'Image {i+1}'] = url
                         except Exception as img_e:
                             logger.error(f"Error processing image {i} for {product_url}: {img_e}")
 
-                # --- 价格和运费 ---
+                # --- Prices, Seller and Competitors ---
                 selected_offer_id = attributes.get('offerServiceId')
-                all_offers = attributes.get('offers', {})
-                offers_data = all_offers.get(ean, all_offers)
-                target_offer = None
                 
-                if selected_offer_id and selected_offer_id in offers_data:
-                    target_offer = offers_data[selected_offer_id]
-                elif offers_data:
-                    target_offer = offers_data[list(offers_data.keys())[0]]
+                # Retrieve all offers dictionary
+                # Typically located in attributes.offers[ean]
+                offers_root = attributes.get('offers', {})
+                raw_offers = offers_root.get(ean, {})
+                
+                # Parse all offers into a structured list
+                parsed_offers = []
+                
+                # Handle cases where offers might be a list or dict
+                offers_iter = raw_offers.values() if isinstance(raw_offers, dict) else raw_offers
+                
+                for offer in offers_iter:
+                    try:
+                        o_id = offer.get('id')
+                        o_attrs = offer.get('attributes', {})
+                        
+                        # Price Logic
+                        price = None
+                        promotion = o_attrs.get('promotion')
+                        if promotion and isinstance(promotion, dict):
+                            price = promotion.get('messageArgs', {}).get('discountedPrice')
+                        if price is None:
+                            price = o_attrs.get('price', {}).get('price')
+                        
+                        if price is not None:
+                            price = float(price)
+                        
+                        # Shipping Logic
+                        marketplace = o_attrs.get('marketplace')
+                        shipping_cost = 0.0
+                        
+                        if marketplace:
+                            shipping = marketplace.get('shipping', {})
+                            is_free = shipping.get('freeShippingFlag')
+                            if is_free is True:
+                                shipping_cost = 0.0
+                            else:
+                                cost = shipping.get('defaultShippingCharge')
+                                shipping_cost = float(cost) if cost is not None else 0.0
+                            
+                            seller_name = marketplace.get('seller', 'Carrefour') # Default if missing
+                        else:
+                            # Usually Carrefour internal offers dont have marketplace key or different structure
+                            seller_name = "Carrefour"
+                            # Check specific carrefour structure if needed, but usually price is key
+                        
+                        if price is not None:
+                            parsed_offers.append({
+                                'id': o_id,
+                                'seller': seller_name,
+                                'price': price,
+                                'shipping': shipping_cost
+                            })
+                            
+                    except Exception as e:
+                        logger.error(f"Error parsing specific offer: {e}")
 
-                if target_offer:
-                    offer_attrs = target_offer.get('attributes', {})
-                    final_price = None
-                    
-                    promotion = offer_attrs.get('promotion')
-                    if promotion and isinstance(promotion, dict):
-                        final_price = promotion.get('messageArgs', {}).get('discountedPrice')
+                # 1. Fill Main Seller Info
+                # If selected_offer_id exists, find it. Else take the first one or default.
+                main_offer = None
+                if selected_offer_id:
+                    for o in parsed_offers:
+                        if o['id'] == selected_offer_id:
+                            main_offer = o
+                            break
+                
+                if not main_offer and parsed_offers:
+                    main_offer = parsed_offers[0]
+                
+                if main_offer:
+                    data['Seller'] = main_offer['seller']
+                    # Main shipping cost is typically linked to the displayed price, 
+                    # but requested output puts shipping in competitor columns.
+                    # We can put main shipping in 'Shipping Cost'
+                    data['Shipping Cost'] = format_price(main_offer['shipping']) if main_offer['shipping'] > 0 else "0.00€"
 
-                    if final_price is None:
-                        final_price = offer_attrs.get('price', {}).get('price')
-                    
-                    if final_price is not None:
-                        data['Price'] = f"{str(final_price).replace('.', ',')}€"
-
-                    shipping_info = offer_attrs.get('marketplace', {}).get('shipping', {})
-                    ship_cost = shipping_info.get('defaultShippingCharge')
-                    is_free = shipping_info.get('freeShippingFlag')
-
-                    if is_free is True:
-                            data['Shipping Cost'] = "0,00€"
-                    elif ship_cost is not None:
-                        data['Shipping Cost'] = f"{str(ship_cost).replace('.', ',')}€"
-                    else:
-                        data['Shipping Cost'] = "See Site"
+                # 2. Find Minimum Price (Overall) for 'Price' column
+                if parsed_offers:
+                    min_price_val = min(o['price'] for o in parsed_offers)
+                    data['Price'] = format_price(min_price_val)
+                
+                # 3. Handle Competitors (Follow-on Sellers)
+                # Filter out the main seller (BuyBox) to list "others"
+                # OR if requirement is just "list cheap offers", sort all.
+                # User said "follow-on merchants", implying others.
+                
+                # Let's filter out the one identified as 'selected_offer_id' to show competitors
+                other_offers = [o for o in parsed_offers if o['id'] != selected_offer_id]
+                
+                # Sort by price ascending
+                other_offers.sort(key=lambda x: x['price'])
+                
+                # Fill top 3
+                for i in range(min(3, len(other_offers))):
+                    offer = other_offers[i]
+                    idx = i + 1
+                    data[f'more_seller{idx}'] = offer['seller']
+                    data[f'price{idx}'] = format_price(offer['price'])
+                    data[f'shipping{idx}'] = format_price(offer['shipping']) if offer['shipping'] > 0 else "0.00€"
 
         except Exception as e:
             logger.error(f"Data Parsing Error for {product_url}: {e}")
 
-    # 4. [兜底策略] 如果 JSON 解析失败导致 Title 为空，尝试使用 Regex 从 HTML 直接提取
+    # Fallback Regex for Title/Price if JSON fails (Same as before, updated format)
     if not data['Title']:
-        logger.info(f"Fallback extraction (Regex) for {product_url}")
-        
-        # 提取标题: 通常在 <h1 class="...">Title</h1>
         try:
             title_match = re.search(r'<h1[^>]*>(.*?)</h1>', html_content, re.IGNORECASE | re.DOTALL)
             if title_match:
                 data['Title'] = remove_html_tags(title_match.group(1))
         except: pass
 
-        # 提取价格: 查找类似 29,99€ 的模式
         if not data['Price']:
             try:
-                # 匹配 'content="29.99"' 或者显示的文本 '29,99 €'
-                # 优先找 meta price
                 price_meta = re.search(r'itemprop="price"[^>]*content="([\d\.]+)"', html_content)
                 if price_meta:
-                    data['Price'] = f"{price_meta.group(1).replace('.', ',')}€"
-                else:
-                    # 尝试模糊匹配文本
-                    price_text = re.search(r'(\d+,\d+)\s?€', html_content)
-                    if price_text:
-                        data['Price'] = f"{price_text.group(1)}€"
+                    data['Price'] = format_price(price_meta.group(1))
             except: pass
 
     return data

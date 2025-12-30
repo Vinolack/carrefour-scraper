@@ -49,8 +49,7 @@ logger.addHandler(console_handler)
 
 def fetch_html_direct(url, max_retries=3, base_delay=2.0):
     """
-    直接使用 Python requests 调用 API，替代 Node.js 子进程。
-    适配返回格式: {'source': '<html>...', 'code': 200}
+    直接使用 Python requests 调用 API
     """
     payload = {
         "url": url,
@@ -59,39 +58,30 @@ def fetch_html_direct(url, max_retries=3, base_delay=2.0):
     
     for attempt in range(1, max_retries + 1):
         try:
-            # 设置较短的连接超时和合理的读取超时
             response = requests.post(API_URL, json=payload, timeout=(5, 60))
             
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    
                     if isinstance(data, dict):
-                        # 检查 code 是否为 200
                         if data.get('code') == 200:
-                            # 优先获取 source 字段
                             if 'source' in data:
                                 return data['source']
-                            # 备用：有些接口可能用 data 字段
                             elif 'data' in data:
                                 return data['data']
                         else:
                             logger.error(f"API Logic Error for {url} | Code: {data.get('code')} | Msg: {data}")
-                            # 如果 code 不是 200，视为失败，进入重试
                             if attempt < max_retries:
                                 time.sleep(base_delay * attempt)
                             continue
 
-                    # 如果返回的是字符串
                     if isinstance(data, str):
                         return data
                         
-                    # 兜底：如果解析不出结构，但 HTTP 200，尝试直接返回 response.text
                     logger.warning(f"Unexpected JSON format for {url}: {str(data)[:100]}")
                     return response.text
 
                 except json.JSONDecodeError:
-                    # 不是 JSON，直接返回文本
                     return response.text
             else:
                 logger.error(f"API Error {response.status_code} for {url} | Response: {response.text[:200]}")
@@ -121,7 +111,6 @@ def process_product_page(url):
     html = fetch_html_direct(url)
     
     if html:
-        # 增加数据校验防止空 HTML 导致解析卡死
         if len(html) < 100:
             logger.error(f"HTML too short or invalid for {url}")
             return {"Product URL": url, "Title": "INVALID_HTML"}
@@ -219,9 +208,14 @@ def main():
         
         try:
             df = pd.DataFrame(scraped_data)
+            # [修改] 更新列顺序，加入 Seller 和跟卖信息
             columns_order = [
                 "Product URL", "EAN", "Brand", "Title", "Category", 
-                "Price", "Shipping Cost", "Description", 
+                "Price", "Shipping Cost", "Seller", 
+                "more_seller1", "price1", "shipping1",
+                "more_seller2", "price2", "shipping2",
+                "more_seller3", "price3", "shipping3",
+                "Description", 
                 "Image 1", "Image 2", "Image 3", "Image 4", "Image 5"
             ]
             for col in columns_order:
