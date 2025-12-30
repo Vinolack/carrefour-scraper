@@ -2,6 +2,20 @@ import re
 import json
 import html
 from urllib.parse import urljoin, urlparse
+import os
+import requests
+import logging
+import time
+import uuid
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
+import configloader
+
+c = configloader.config()
+IMAGE_HOST_UPLOAD_URL = c.get_key("image_host_upload_url")
+IMAGE_TOKEN = c.get_key("image_token")
+MAX_RETRIES = 5
+
 
 def extract_product_links(html_content):
     """
@@ -47,6 +61,54 @@ def remove_html_tags(text):
         return ""
     clean = re.compile('<.*?>')
     return re.sub(clean, '', text).strip()
+
+# ---  Image Download and Upload Functions ---
+def download_image(url: str, timeout: int = 30) -> Optional[str]:
+    image_dir = "product_image"
+    os.makedirs(image_dir, exist_ok=True)
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'},
+                timeout=timeout
+            )
+            response.raise_for_status()
+            path = urlsplit(url).path
+            ext = os.path.splitext(path)[1]
+            filename = f"{uuid.uuid4()}{ext or '.jpg'}"
+            save_path = os.path.join(image_dir, filename)
+            with open(save_path, 'wb') as f:
+                f.write(response.content)
+            return save_path
+        except requests.exceptions.RequestException as e:
+            logging.info(f"[Retry {attempt+1}/{MAX_RETRIES}] {url} - {e.__class__.__name__}")
+            if attempt == MAX_RETRIES:
+                logging.error(f"下载失败: {url} - {e}")
+                return None
+            time.sleep(2 ** attempt)
+
+def upload_to_image_host(file_path: str) -> Optional[str]:
+    for attempt in range(MAX_RETRIES):
+        try:
+            with open(file_path, 'rb') as f:
+                response = requests.post(
+                    IMAGE_HOST_UPLOAD_URL,
+                    files={'image': f},
+                    data={'token': IMAGE_TOKEN},
+                    timeout=10 * (attempt + 1)
+                )
+            if response.ok:
+                original_url = response.json()['url']
+                parts = list(urlsplit(original_url))
+                parts[1] = "gbcm-imagehost.vshare.dev" # 替换域名
+                return urlunsplit(parts)
+            logging.error(f"[Retry {attempt+1}] 上传失败 HTTP {response.status_code}")
+        except Exception as e:
+            logging.error(f"[Retry {attempt+1}] 上传异常: {str(e)}")
+        if attempt < MAX_RETRIES:
+            time.sleep(2 ** (attempt + 1))
+    return None
 
 def extract_product_details(html_content, product_url):
     """
@@ -140,9 +202,29 @@ def extract_product_details(html_content, product_url):
 
                 # --- 图片 ---
                 img_paths = attributes.get('images', {}).get('paths', [])
+                local_image_paths = []
                 for i, img_url in enumerate(img_paths[:5]):
                     final_img = img_url.replace('p_FORMAT', 'p_1500x1500')
-                    data[f'Image {i+1}'] = final_img
+                    # 先下载到本地，再上传到图床，最后把图床返回的链接存入 data
+                    uploaded_url = None
+                    try:
+                        local_path = download_image(final_img)
+                        if local_path:
+                            uploaded_url = upload_to_image_host(local_path)
+                            if uploaded_url:
+                                data[f'Image {i+1}'] = uploaded_url
+                                local_image_paths.append(local_path)
+                    except Exception as e:
+                        logging.error(f"Image processing error for {final_img}: {e}")
+
+                    finally:
+                        # 清理本地文件
+                        for path in local_image_paths:
+                            try:
+                                if os.path.exists(path):
+                                    os.remove(path)
+                            except Exception as e:
+                                logging.warning(f"无法删除本地图片 {path}: {e}")
 
                 # --- 价格和运费 ---
                 selected_offer_id = attributes.get('offerServiceId')
