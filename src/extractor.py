@@ -1,55 +1,31 @@
 import re
-from urllib.parse import urljoin
+import json
+import html
+from urllib.parse import urljoin, urlparse
 
 def extract_product_links(html_content):
     """
     从HTML内容中提取 Carrefour 商品链接。
-    采用多重策略以确保最大兼容性。
     """
     if not html_content:
-        print("警告: extract_product_links 收到了空的内容")
         return []
     
-    # 调试信息：确认接收到的内容长度
-    print(f"DEBUG: 正在处理 HTML 内容，长度: {len(html_content)} 字符")
-
     base_url = "https://www.carrefour.fr"
     found_links = set()
 
     # ---------------------------------------------------------
-    # 策略 1: 标准 href 匹配 (支持单引号、双引号，支持 href = "...")
+    # 扫描所有包含 /p/ 的类似链接的字符串
     # ---------------------------------------------------------
-    # 解释:
-    # href\s*=\s* -> 匹配 href=，允许等号周围有空格
-    # ["']         -> 匹配开头的引号 (单引号或双引号)
-    # (.*?)        -> 捕获链接内容 (非贪婪)
-    # ["']         -> 匹配结尾的引号
-    regex_href = r'href\s*=\s*["\']([^"\']*/p/[^"\']+)["\']'
-    
-    matches_href = re.findall(regex_href, html_content, re.IGNORECASE)
-    for link in matches_href:
-        found_links.add(clean_and_join(base_url, link))
+    # 匹配 /p/ 开头，直到遇到 引号、空格、问号或 HTML 标签结束符
+    # 适用于 JSON 中的 "\/p\/..." 或者 href="/p/..."
+    regex_loose = r'(?:https?:\\?/\\?/[a-z0-9\.-]+)?(\\?/p\\?/[a-zA-Z0-9\-%_\.]+)'
+    matches_loose = re.findall(regex_loose, html_content)
+    for link in matches_loose:
+        # 修复可能存在的转义斜杠 (例如 json 中的 \/)
+        clean_link = link.replace('\\/', '/')
+        found_links.add(clean_and_join(base_url, clean_link))
 
-    # ---------------------------------------------------------
-    # 策略 2: 兜底策略 - 扫描所有包含 /p/ 的类似链接的字符串
-    # ---------------------------------------------------------
-    # 如果策略 1 没找到，或者 HTML 格式非常乱 (例如 JSON 字符串中的转义引号)
-    if len(found_links) == 0:
-        print("DEBUG: 策略1未找到链接，尝试策略2 (JSON/宽泛搜索)...")
-        # 匹配 /p/ 开头，直到遇到 引号、空格、问号或 HTML 标签结束符
-        # 适用于 JSON 中的 "\/p\/..." 或者 href="/p/..."
-        regex_loose = r'(?:https?:\\?/\\?/[a-z0-9\.-]+)?(\\?/p\\?/[a-zA-Z0-9\-%_\.]+)'
-        
-        matches_loose = re.findall(regex_loose, html_content)
-        for link in matches_loose:
-            # 修复可能存在的转义斜杠 (例如 json 中的 \/)
-            clean_link = link.replace('\\/', '/')
-            found_links.add(clean_and_join(base_url, clean_link))
-
-    product_links = list(found_links)
-    print(f"DEBUG: 提取结束，共找到 {len(product_links)} 个链接")
-    
-    return product_links
+    return list(found_links)
 
 def clean_and_join(base_url, link):
     """辅助函数：拼接 URL 并清理格式"""
@@ -63,9 +39,156 @@ def clean_and_join(base_url, link):
         full_url = urljoin(base_url, link)
     else:
         full_url = link
-        
     return full_url
 
-def read_links_from_file(file_path):
-    from .excel_reader import read_links_from_excel
-    return read_links_from_excel(file_path)
+def remove_html_tags(text):
+    """移除字符串中的HTML标签"""
+    if not text:
+        return ""
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text).strip()
+
+def extract_product_details(html_content, product_url):
+    """
+    从商品详情页HTML中提取详细信息。
+    返回包含所需字段的字典。
+    """
+    data = {
+        "Product URL": product_url,
+        "Category": "",
+        "Title": "",
+        "Description": "",
+        "Price": "",
+        "Shipping Cost": "",
+        "Brand": "",
+        "EAN": "",
+        "Image 1": "", "Image 2": "", "Image 3": "", "Image 4": "", "Image 5": ""
+    }
+
+    if not html_content:
+        return data
+
+    try:
+        # 1. 尝试从 URL 提取 EAN (通常在末尾)
+        ean_match = re.search(r'-(\d+)$', product_url)
+        ean = ean_match.group(1) if ean_match else None
+        if ean:
+            data['EAN'] = ean
+
+        # 2. 提取 __INITIAL_STATE__ JSON 数据 (使用字符串定位法)
+        marker = "window.__INITIAL_STATE__="
+        start_idx = html_content.find(marker)
+        
+        state_data = None
+        
+        if start_idx != -1:
+            # 确定截取范围
+            value_start = start_idx + len(marker)
+            # 寻找脚本结束标签
+            script_end_idx = html_content.find("</script>", value_start)
+            
+            if script_end_idx != -1:
+                json_str = html_content[value_start:script_end_idx].strip()
+                clean_json_str = json_str.replace('\\"', '"').replace('\\\\', '\\')
+                # 清理末尾可能存在的分号
+                if clean_json_str.endswith(';'):
+                    clean_json_str = clean_json_str[:-1]
+                
+                try:
+                    state_data = json.loads(clean_json_str)
+                except json.JSONDecodeError as e:
+                    print(f"JSON Decode Error for {product_url}: {e}")
+        else:
+            print(f"Warning: '__INITIAL_STATE__' not found in HTML for {product_url}")
+
+        # 3. 解析 JSON 数据
+        if state_data:
+            try:
+                # 路径: vuex -> analytics -> indexedEntities -> product
+                products_map = state_data.get('vuex', {}).get('analytics', {}).get('indexedEntities', {}).get('product', {})
+                
+                # 如果没有 EAN 或者 EAN 不在 keys 里，尝试取第一个 key
+                if not ean or ean not in products_map:
+                    if products_map:
+                        ean = list(products_map.keys())[0]
+                        data['EAN'] = ean
+                
+                product_info = products_map.get(ean, {})
+                attributes = product_info.get('attributes', {})
+
+                if not attributes:
+                    print(f"Warning: No attributes found for EAN {ean}")
+                    return data
+
+                # --- 基础信息 ---
+                data['Title'] = attributes.get('title', '') or attributes.get('shortTitle', '')
+                data['Brand'] = attributes.get('brand', '')
+
+                # --- 描述 ---
+                desc_obj = attributes.get('description', {})
+                raw_desc = desc_obj.get('long', '') or desc_obj.get('short', '')
+                data['Description'] = html.unescape(remove_html_tags(raw_desc))
+
+                # 提取类目
+                # categories 是一个列表，我们将其拼接成路径
+                categories = attributes.get('categories', [])
+                if categories:
+                    # 按 level 排序以防乱序
+                    sorted_cats = sorted(categories, key=lambda x: x.get('level', 0))
+                    cat_names = [c.get('label', '') for c in sorted_cats]
+                    data['Category'] = " / ".join(cat_names)
+
+                # --- 图片 ---
+                img_paths = attributes.get('images', {}).get('paths', [])
+                for i, img_url in enumerate(img_paths[:5]):
+                    final_img = img_url.replace('p_FORMAT', 'p_1500x1500')
+                    data[f'Image {i+1}'] = final_img
+
+                # --- 价格和运费 ---
+                selected_offer_id = attributes.get('offerServiceId')
+                all_offers = attributes.get('offers', {})
+                
+                # 兼容 offers 结构: 可能包含 EAN 层级，也可能直接是 offer ID 层级
+                offers_data = {}
+                if ean in all_offers:
+                    offers_data = all_offers[ean]
+                else:
+                    offers_data = all_offers
+
+                target_offer = None
+                
+                # 定位 offer
+                if selected_offer_id and selected_offer_id in offers_data:
+                    target_offer = offers_data[selected_offer_id]
+                elif offers_data:
+                    first_key = list(offers_data.keys())[0]
+                    target_offer = offers_data[first_key]
+
+                if target_offer:
+                    # 价格
+                    price_info = target_offer.get('price', {})
+                    final_price = price_info.get('discountedPrice')
+                    if final_price is None:
+                        final_price = price_info.get('price')
+                    
+                    if final_price is not None:
+                        data['Price'] = f"{str(final_price).replace('.', ',')}€"
+
+                    # 运费
+                    shipping_info = target_offer.get('marketplace', {}).get('shipping', {})
+                    ship_cost = shipping_info.get('defaultShippingCharge')
+                    
+                    if ship_cost is None:
+                        data['Shipping Cost'] = "See Site"
+                    elif ship_cost == 0:
+                        data['Shipping Cost'] = "0.00€"
+                    else:
+                        data['Shipping Cost'] = f"{str(ship_cost).replace('.', ',')}€"
+
+            except Exception as e:
+                print(f"Data Parsing Error: {e}")
+
+    except Exception as e:
+        print(f"Extraction Error: {e}")
+
+    return data
