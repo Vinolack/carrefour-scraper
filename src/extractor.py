@@ -166,24 +166,41 @@ def extract_product_details(html_content, product_url):
 
                 if target_offer:
                     # 价格
-                    price_info = target_offer.get('price', {})
-                    final_price = price_info.get('discountedPrice')
+                    offer_attrs = target_offer.get('attributes', {})
+
+                    final_price = None
+                    
+                    # 1. 尝试从 promotion 中获取折扣价
+                    # 数据结构示例: attributes -> promotion -> messageArgs -> discountedPrice
+                    promotion = offer_attrs.get('promotion')
+                    if promotion and isinstance(promotion, dict):
+                        message_args = promotion.get('messageArgs', {})
+                        final_price = message_args.get('discountedPrice')
+
+                    # 2. 如果没有折扣价，从 price 对象中获取原价
+                    # 数据结构示例: attributes -> price -> price
                     if final_price is None:
+                        price_info = offer_attrs.get('price', {})
                         final_price = price_info.get('price')
                     
                     if final_price is not None:
                         data['Price'] = f"{str(final_price).replace('.', ',')}€"
-
-                    # 运费
-                    shipping_info = target_offer.get('marketplace', {}).get('shipping', {})
-                    ship_cost = shipping_info.get('defaultShippingCharge')
-                    
-                    if ship_cost is None:
-                        data['Shipping Cost'] = "See Site"
-                    elif ship_cost == 0:
-                        data['Shipping Cost'] = "0.00€"
                     else:
+                         # 如果真的找不到价格，可以设为默认值或保持 None
+                        pass
+
+                    # 数据结构示例: attributes -> marketplace -> shipping
+                    shipping_info = offer_attrs.get('marketplace', {}).get('shipping', {})
+                    ship_cost = shipping_info.get('defaultShippingCharge')
+                    is_free_shipping = shipping_info.get('freeShippingFlag')
+
+                    if is_free_shipping is True:
+                         data['Shipping Cost'] = "0,00€"
+                    elif ship_cost is not None:
                         data['Shipping Cost'] = f"{str(ship_cost).replace('.', ',')}€"
+                    else:
+                        # 只有当既不是免运费，又没有具体金额时，才显示 See Site
+                        data['Shipping Cost'] = "See Site"
 
             except Exception as e:
                 print(f"Data Parsing Error: {e}")

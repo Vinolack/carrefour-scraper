@@ -7,3 +7,6 @@ __pycache__/
 .env.*.local
 node_modules/
 scraper.log
+carrefour_products_*.xlsx
+input_links.xlsx
+packeage-lock.json
