@@ -1,7 +1,7 @@
 default_pages = 1
-cf_port = 3000
 IMAGE_HOST_UPLOAD_URL = "http://38.135.29.32:8080/api/index.php"
 IMAGE_TOKEN = "469e32648194ea9dc4e159ff25e5c61e"
 
 [api]
 cf_host = "100.100.226.4"
+cf_port = 3000

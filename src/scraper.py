@@ -103,15 +103,26 @@ def main():
     all_product_urls = set()
     logger.info("--- Phase 1: Collecting Product URLs from Store Pages ---")
     
-    for store_link in store_links:
-        html = fetch_html_via_node(store_link)
+    for link_item in store_links:
+        # 这里的 link_item 可能是列表页链接，也可能是商品链接
+        # 清理一下空白字符
+        url_to_check = link_item.strip()
+        
+        # 判断是否直接为商品链接（包含 /p/）
+        if "/p/" in url_to_check:
+            logger.info(f"Detected direct product link: {url_to_check}")
+            all_product_urls.add(url_to_check)
+            continue # 跳过下面的店铺页抓取逻辑
+
+        # 如果不是商品链接，则视为店铺/分类列表页
+        html = fetch_html_via_node(url_to_check)
         if html:
             links = extract_product_links(html)
-            logger.info(f"Found {len(links)} products on store page: {store_link}")
+            logger.info(f"Found {len(links)} products on store page: {url_to_check}")
             for l in links:
                 all_product_urls.add(l)
         else:
-            logger.error(f"Failed to fetch store page: {store_link}")
+            logger.error(f"Failed to fetch store page: {url_to_check}")
 
     unique_product_list = sorted(list(all_product_urls))
     logger.info(f"Total unique products found: {len(unique_product_list)}")

@@ -12,8 +12,8 @@ from urllib.parse import urlsplit, urlunsplit
 import configloader
 
 c = configloader.config()
-IMAGE_HOST_UPLOAD_URL = c.get_key("image_host_upload_url")
-IMAGE_TOKEN = c.get_key("image_token")
+IMAGE_HOST_UPLOAD_URL = c.get_key("IMAGE_HOST_UPLOAD_URL")
+IMAGE_TOKEN = c.get_key("IMAGE_TOKEN")
 MAX_RETRIES = 5
 
 
@@ -32,7 +32,7 @@ def extract_product_links(html_content):
     # ---------------------------------------------------------
     # 匹配 /p/ 开头，直到遇到 引号、空格、问号或 HTML 标签结束符
     # 适用于 JSON 中的 "\/p\/..." 或者 href="/p/..."
-    regex_loose = r'(?:https?:\\?/\\?/[a-z0-9\.-]+)?(\\?/p\\?/[a-zA-Z0-9\-%_\.]+)'
+    regex_loose = r'(?:https?:\\?/\\?/[a-z0-9\.-]+)?(\\?/p\\?/[a-zA-Z0-9\-%_\.\?=&]+)'
     matches_loose = re.findall(regex_loose, html_content)
     for link in matches_loose:
         # 修复可能存在的转义斜杠 (例如 json 中的 \/)

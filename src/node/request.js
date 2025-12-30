@@ -1,9 +1,19 @@
 const axios = require('axios');
 const path = require('path');
+const fs = require('fs');
+const toml = require('toml');
 
 // Load config from project root
-const config = require(path.resolve(__dirname, '../../config.json'));
-const BASE_POST_URL = `http://${config.cf_host}:${config.cf_port}/cf-clearance-scraper`;
+const configPath = path.resolve(__dirname, '../../config.toml');
+let config;
+try {
+    const configFile = fs.readFileSync(configPath, 'utf-8');
+    config = toml.parse(configFile);
+} catch (e) {
+    console.error("无法读取或解析 config.toml:", e.message);
+    process.exit(1);
+}
+const BASE_POST_URL = `http://${config.api.cf_host}:${config.api.cf_port}/cf-clearance-scraper`;
 
 async function bypass_cf_clearance(proxyConfig) {
     try {
