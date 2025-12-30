@@ -1,53 +1,39 @@
 import re
 import json
 import html
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 import os
 import requests
 import logging
 import time
 import uuid
 from typing import Optional
-from urllib.parse import urlsplit, urlunsplit
 import configloader
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 1. 获取主 Logger (必须与 scraper.py 中定义的名称一致)
+logger = logging.getLogger('carrefour_scraper')
 
 c = configloader.config()
 IMAGE_HOST_UPLOAD_URL = c.get_key("IMAGE_HOST_UPLOAD_URL")
 IMAGE_TOKEN = c.get_key("IMAGE_TOKEN")
 MAX_RETRIES = 5
 
-
 def extract_product_links(html_content):
-    """
-    从HTML内容中提取 Carrefour 商品链接。
-    """
     if not html_content:
         return []
-    
     base_url = "https://www.carrefour.fr"
     found_links = set()
-
-    # ---------------------------------------------------------
-    # 扫描所有包含 /p/ 的类似链接的字符串
-    # ---------------------------------------------------------
-    # 匹配 /p/ 开头，直到遇到 引号、空格、问号或 HTML 标签结束符
-    # 适用于 JSON 中的 "\/p\/..." 或者 href="/p/..."
     regex_loose = r'(?:https?:\\?/\\?/[a-z0-9\.-]+)?(\\?/p\\?/[a-zA-Z0-9\-%_\.\?=&]+)'
     matches_loose = re.findall(regex_loose, html_content)
     for link in matches_loose:
-        # 修复可能存在的转义斜杠 (例如 json 中的 \/)
         clean_link = link.replace('\\/', '/')
         found_links.add(clean_and_join(base_url, clean_link))
-
     return list(found_links)
 
 def clean_and_join(base_url, link):
-    """辅助函数：拼接 URL 并清理格式"""
     link = link.strip()
-    
-    # 如果是相对路径，拼接域名
     if not link.startswith('http'):
-        # 确保 link 以 / 开头 (urljoin 需要)
         if not link.startswith('/'):
             link = '/' + link
         full_url = urljoin(base_url, link)
@@ -56,74 +42,148 @@ def clean_and_join(base_url, link):
     return full_url
 
 def remove_html_tags(text):
-    """移除字符串中的HTML标签"""
     if not text:
         return ""
     clean = re.compile('<.*?>')
     return re.sub(clean, '', text).strip()
 
-# ---  Image Download and Upload Functions ---
+# --- Robust Image Functions ---
+
 def download_image(url: str, timeout: int = 30) -> Optional[str]:
+    """下载图片到本地，包含详细的错误日志"""
     image_dir = "product_image"
     os.makedirs(image_dir, exist_ok=True)
+    
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.get(
-                url,
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'},
-                timeout=timeout
-            )
-            response.raise_for_status()
+            # 增加 verify=False 以防证书问题，设置 strict headers
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=timeout)
+            
+            if response.status_code != 200:
+                logger.error(f"[Download Fail] {url} | Status: {response.status_code}")
+                # 非 200 状态码一般重试也没用，除非是 5xx
+                if 500 <= response.status_code < 600:
+                    time.sleep(1.5)
+                    continue
+                return None
+
+            if not response.content:
+                logger.error(f"[Download Fail] {url} | Empty content received")
+                return None
+
             path = urlsplit(url).path
             ext = os.path.splitext(path)[1]
-            filename = f"{uuid.uuid4()}{ext or '.jpg'}"
+            if not ext: ext = '.jpg'
+            
+            filename = f"{uuid.uuid4()}{ext}"
             save_path = os.path.join(image_dir, filename)
+            
             with open(save_path, 'wb') as f:
                 f.write(response.content)
+            
             return save_path
+
         except requests.exceptions.RequestException as e:
-            logging.info(f"[Retry {attempt+1}/{MAX_RETRIES}] {url} - {e.__class__.__name__}")
-            if attempt == MAX_RETRIES:
-                logging.error(f"下载失败: {url} - {e}")
+            # 只有最后一次重试失败才记录 ERROR，避免日志刷屏，但可以记录 debug
+            if attempt == MAX_RETRIES - 1:
+                logger.error(f"[Download Error] {url} after {MAX_RETRIES} retries: {e}")
                 return None
-            time.sleep(2 ** attempt)
+            time.sleep(1.0 * (attempt + 1))
+        except Exception as e:
+            logger.error(f"[Download Exception] {url} : {e}")
+            return None
+            
+    return None
 
 def upload_to_image_host(file_path: str) -> Optional[str]:
+    """上传图片到图床，包含响应内容分析日志"""
+    if not os.path.exists(file_path):
+        logger.error(f"[Upload Error] File not found: {file_path}")
+        return None
+    
+    if os.path.getsize(file_path) == 0:
+        logger.error(f"[Upload Error] Empty file: {file_path}")
+        return None
+
     for attempt in range(MAX_RETRIES):
         try:
+            with open(file_path, 'rb') as f:
+                # 注意：files 需要重新打开，或者 seek(0)
+                # 上面 with open 已经打开了，但在循环里每次都要重新读取流的位置
+                # 这里每次循环都重新 open 比较安全
+                pass
+
             with open(file_path, 'rb') as f:
                 response = requests.post(
                     IMAGE_HOST_UPLOAD_URL,
                     files={'image': f},
                     data={'token': IMAGE_TOKEN},
-                    timeout=10 * (attempt + 1)
+                    timeout=15 * (attempt + 1)
                 )
+            
             if response.ok:
-                original_url = response.json()['url']
-                parts = list(urlsplit(original_url))
-                parts[1] = "gbcm-imagehost.vshare.dev" # 替换域名
-                return urlunsplit(parts)
-            logging.error(f"[Retry {attempt+1}] 上传失败 HTTP {response.status_code}")
+                try:
+                    json_resp = response.json()
+                    original_url = json_resp.get('url')
+                    if original_url:
+                        parts = list(urlsplit(original_url))
+                        parts[1] = "gbcm-imagehost.vshare.dev"
+                        return urlunsplit(parts)
+                    else:
+                        logger.error(f"[Upload Fail] JSON missing 'url' field. Resp: {json_resp}")
+                except json.JSONDecodeError:
+                    logger.error(f"[Upload Fail] Invalid JSON response. Body: {response.text[:100]}")
+            else:
+                # 记录非 200 的响应内容，帮助 Debug
+                logger.error(f"[Upload Fail] Status: {response.status_code} | Body: {response.text[:200]}")
+
+        except requests.exceptions.RequestException as e:
+            if attempt == MAX_RETRIES - 1:
+                logger.error(f"[Upload Error] Failed after {MAX_RETRIES} attempts: {e}")
+            time.sleep(1.0 * (attempt + 1))
         except Exception as e:
-            logging.error(f"[Retry {attempt+1}] 上传异常: {str(e)}")
-        if attempt < MAX_RETRIES:
-            time.sleep(2 ** (attempt + 1))
+            logger.error(f"[Upload Exception] {e}")
+            break
+            
     return None
 
+def process_single_image(index, img_url):
+    """
+    辅助函数：处理单张图片的下载与上传，用于线程池
+    返回 (index, final_url_or_None)
+    """
+    final_img = img_url.replace('p_FORMAT', 'p_1500x1500')
+    uploaded_url = None
+    local_path = None
+    
+    try:
+        local_path = download_image(final_img)
+        if local_path:
+            uploaded_url = upload_to_image_host(local_path)
+        else:
+            # 下载失败已经在 download_image 中记录日志
+            pass
+            
+    except Exception as e:
+        logger.error(f"Image processing pipeline error for {final_img}: {e}")
+    finally:
+        # 清理本地文件
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except OSError as e:
+                logger.warning(f"Failed to delete temp image {local_path}: {e}")
+                
+    return index, uploaded_url
+
 def extract_product_details(html_content, product_url):
-    """
-    从商品详情页HTML中提取详细信息。
-    返回包含所需字段的字典。
-    """
     data = {
         "Product URL": product_url,
-        "Category": "",
-        "Title": "",
-        "Description": "",
-        "Price": "",
-        "Shipping Cost": "",
-        "Brand": "",
-        "EAN": "",
+        "Category": "", "Title": "", "Description": "",
+        "Price": "", "Shipping Cost": "", "Brand": "", "EAN": "",
         "Image 1": "", "Image 2": "", "Image 3": "", "Image 4": "", "Image 5": ""
     }
 
@@ -131,45 +191,29 @@ def extract_product_details(html_content, product_url):
         return data
 
     try:
-        # 1. 尝试从 URL 提取 EAN (通常在末尾)
         ean_match = re.search(r'-(\d+)$', product_url)
         ean = ean_match.group(1) if ean_match else None
-        if ean:
-            data['EAN'] = ean
+        if ean: data['EAN'] = ean
 
-        # 2. 提取 __INITIAL_STATE__ JSON 数据 (使用字符串定位法)
         marker = "window.__INITIAL_STATE__="
         start_idx = html_content.find(marker)
-        
         state_data = None
         
         if start_idx != -1:
-            # 确定截取范围
             value_start = start_idx + len(marker)
-            # 寻找脚本结束标签
             script_end_idx = html_content.find("</script>", value_start)
-            
             if script_end_idx != -1:
                 json_str = html_content[value_start:script_end_idx].strip()
                 clean_json_str = json_str.replace('\\"', '"').replace('\\\\', '\\')
-                # 清理末尾可能存在的分号
-                if clean_json_str.endswith(';'):
-                    clean_json_str = clean_json_str[:-1]
-                
+                if clean_json_str.endswith(';'): clean_json_str = clean_json_str[:-1]
                 try:
                     state_data = json.loads(clean_json_str)
                 except json.JSONDecodeError as e:
-                    print(f"JSON Decode Error for {product_url}: {e}")
-        else:
-            print(f"Warning: '__INITIAL_STATE__' not found in HTML for {product_url}")
+                    logger.warning(f"JSON Decode Error for {product_url}: {e}")
 
-        # 3. 解析 JSON 数据
         if state_data:
             try:
-                # 路径: vuex -> analytics -> indexedEntities -> product
                 products_map = state_data.get('vuex', {}).get('analytics', {}).get('indexedEntities', {}).get('product', {})
-                
-                # 如果没有 EAN 或者 EAN 不在 keys 里，尝试取第一个 key
                 if not ean or ean not in products_map:
                     if products_map:
                         ean = list(products_map.keys())[0]
@@ -178,116 +222,85 @@ def extract_product_details(html_content, product_url):
                 product_info = products_map.get(ean, {})
                 attributes = product_info.get('attributes', {})
 
-                if not attributes:
-                    print(f"Warning: No attributes found for EAN {ean}")
-                    return data
-
-                # --- 基础信息 ---
-                data['Title'] = attributes.get('title', '') or attributes.get('shortTitle', '')
-                data['Brand'] = attributes.get('brand', '')
-
-                # --- 描述 ---
-                desc_obj = attributes.get('description', {})
-                raw_desc = desc_obj.get('long', '') or desc_obj.get('short', '')
-                data['Description'] = html.unescape(remove_html_tags(raw_desc))
-
-                # 提取类目
-                # categories 是一个列表，我们将其拼接成路径
-                categories = attributes.get('categories', [])
-                if categories:
-                    # 按 level 排序以防乱序
-                    sorted_cats = sorted(categories, key=lambda x: x.get('level', 0))
-                    cat_names = [c.get('label', '') for c in sorted_cats]
-                    data['Category'] = " / ".join(cat_names)
-
-                # --- 图片 ---
-                img_paths = attributes.get('images', {}).get('paths', [])
-                local_image_paths = []
-                for i, img_url in enumerate(img_paths[:5]):
-                    final_img = img_url.replace('p_FORMAT', 'p_1500x1500')
-                    # 先下载到本地，再上传到图床，最后把图床返回的链接存入 data
-                    uploaded_url = None
-                    try:
-                        local_path = download_image(final_img)
-                        if local_path:
-                            uploaded_url = upload_to_image_host(local_path)
-                            if uploaded_url:
-                                data[f'Image {i+1}'] = uploaded_url
-                                local_image_paths.append(local_path)
-                    except Exception as e:
-                        logging.error(f"Image processing error for {final_img}: {e}")
-
-                    finally:
-                        # 清理本地文件
-                        for path in local_image_paths:
-                            try:
-                                if os.path.exists(path):
-                                    os.remove(path)
-                            except Exception as e:
-                                logging.warning(f"无法删除本地图片 {path}: {e}")
-
-                # --- 价格和运费 ---
-                selected_offer_id = attributes.get('offerServiceId')
-                all_offers = attributes.get('offers', {})
-                
-                # 兼容 offers 结构: 可能包含 EAN 层级，也可能直接是 offer ID 层级
-                offers_data = {}
-                if ean in all_offers:
-                    offers_data = all_offers[ean]
-                else:
-                    offers_data = all_offers
-
-                target_offer = None
-                
-                # 定位 offer
-                if selected_offer_id and selected_offer_id in offers_data:
-                    target_offer = offers_data[selected_offer_id]
-                elif offers_data:
-                    first_key = list(offers_data.keys())[0]
-                    target_offer = offers_data[first_key]
-
-                if target_offer:
-                    # 价格
-                    offer_attrs = target_offer.get('attributes', {})
-
-                    final_price = None
+                if attributes:
+                    data['Title'] = attributes.get('title', '') or attributes.get('shortTitle', '')
+                    data['Brand'] = attributes.get('brand', '')
                     
-                    # 1. 尝试从 promotion 中获取折扣价
-                    # 数据结构示例: attributes -> promotion -> messageArgs -> discountedPrice
-                    promotion = offer_attrs.get('promotion')
-                    if promotion and isinstance(promotion, dict):
-                        message_args = promotion.get('messageArgs', {})
-                        final_price = message_args.get('discountedPrice')
+                    desc_obj = attributes.get('description', {})
+                    raw_desc = desc_obj.get('long', '') or desc_obj.get('short', '')
+                    data['Description'] = html.unescape(remove_html_tags(raw_desc))
 
-                    # 2. 如果没有折扣价，从 price 对象中获取原价
-                    # 数据结构示例: attributes -> price -> price
-                    if final_price is None:
-                        price_info = offer_attrs.get('price', {})
-                        final_price = price_info.get('price')
+                    categories = attributes.get('categories', [])
+                    if categories:
+                        sorted_cats = sorted(categories, key=lambda x: x.get('level', 0))
+                        cat_names = [c.get('label', '') for c in sorted_cats]
+                        data['Category'] = " / ".join(cat_names)
+
+                    # --- 并发处理图片 (Concurrent Image Processing) ---
+                    img_paths = attributes.get('images', {}).get('paths', [])
+                    target_imgs = img_paths[:5]
                     
-                    if final_price is not None:
-                        data['Price'] = f"{str(final_price).replace('.', ',')}€"
-                    else:
-                         # 如果真的找不到价格，可以设为默认值或保持 None
-                        pass
+                    if target_imgs:
+                        # 使用线程池并发下载和上传图片
+                        # 建议 worker 数不宜过大，以免触发图床频率限制
+                        with ThreadPoolExecutor(max_workers=5) as img_executor:
+                            future_to_idx = {}
+                            for i, img_url in enumerate(target_imgs):
+                                future = img_executor.submit(process_single_image, i, img_url)
+                                future_to_idx[future] = i
+                            
+                            for future in as_completed(future_to_idx):
+                                try:
+                                    idx, url = future.result()
+                                    if url:
+                                        data[f'Image {idx+1}'] = url
+                                    else:
+                                        # 如果 URL 为空，已经在 process_single_image 中记录了日志
+                                        # 这里不需要额外操作
+                                        pass
+                                except Exception as exc:
+                                    logger.error(f"Image thread exception for product {product_url}: {exc}")
 
-                    # 数据结构示例: attributes -> marketplace -> shipping
-                    shipping_info = offer_attrs.get('marketplace', {}).get('shipping', {})
-                    ship_cost = shipping_info.get('defaultShippingCharge')
-                    is_free_shipping = shipping_info.get('freeShippingFlag')
+                    # --- 价格和运费 ---
+                    selected_offer_id = attributes.get('offerServiceId')
+                    all_offers = attributes.get('offers', {})
+                    offers_data = all_offers.get(ean, all_offers)
+                    target_offer = None
+                    
+                    if selected_offer_id and selected_offer_id in offers_data:
+                        target_offer = offers_data[selected_offer_id]
+                    elif offers_data:
+                        target_offer = offers_data[list(offers_data.keys())[0]]
 
-                    if is_free_shipping is True:
-                         data['Shipping Cost'] = "0,00€"
-                    elif ship_cost is not None:
-                        data['Shipping Cost'] = f"{str(ship_cost).replace('.', ',')}€"
-                    else:
-                        # 只有当既不是免运费，又没有具体金额时，才显示 See Site
-                        data['Shipping Cost'] = "See Site"
+                    if target_offer:
+                        offer_attrs = target_offer.get('attributes', {})
+                        final_price = None
+                        
+                        promotion = offer_attrs.get('promotion')
+                        if promotion and isinstance(promotion, dict):
+                            final_price = promotion.get('messageArgs', {}).get('discountedPrice')
+
+                        if final_price is None:
+                            final_price = offer_attrs.get('price', {}).get('price')
+                        
+                        if final_price is not None:
+                            data['Price'] = f"{str(final_price).replace('.', ',')}€"
+
+                        shipping_info = offer_attrs.get('marketplace', {}).get('shipping', {})
+                        ship_cost = shipping_info.get('defaultShippingCharge')
+                        is_free = shipping_info.get('freeShippingFlag')
+
+                        if is_free is True:
+                             data['Shipping Cost'] = "0,00€"
+                        elif ship_cost is not None:
+                            data['Shipping Cost'] = f"{str(ship_cost).replace('.', ',')}€"
+                        else:
+                            data['Shipping Cost'] = "See Site"
 
             except Exception as e:
-                print(f"Data Parsing Error: {e}")
+                logger.error(f"Data Parsing Error for {product_url}: {e}")
 
     except Exception as e:
-        print(f"Extraction Error: {e}")
+        logger.error(f"Extraction Error for {product_url}: {e}")
 
     return data
