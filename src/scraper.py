@@ -1,9 +1,10 @@
-import subprocess
 import os
 import sys
 import time
 import logging
 import pandas as pd
+import requests
+import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import configloader
@@ -15,18 +16,23 @@ from extractor import extract_product_links, extract_product_details
 c = configloader.config()
 MAX_WORKERS = c.get_key("max_concurrent_tasks") or 5 
 
+# 获取 API 配置
+api_config = c.get_key("api") or {}
+CF_HOST = api_config.get("cf_host", "127.0.0.1")
+CF_PORT = api_config.get("cf_port", 3000)
+API_URL = f"http://{CF_HOST}:{CF_PORT}/cf-clearance-scraper"
+
 def get_exe_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     else:
         return os.path.dirname(os.path.abspath(__file__))
 
-# --- 日志系统配置 (Robust Logging Setup) ---
+# --- 日志系统配置 ---
 logger = logging.getLogger('carrefour_scraper')
-logger.setLevel(logging.DEBUG) # 基础级别设为 DEBUG，由 Handler 过滤
-logger.propagate = False # 防止传播到 root logger 造成重复打印
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
-# 1. 文件日志：只记录错误 (ERROR)
 log_file = os.path.normpath(os.path.join(get_exe_dir(), '..', 'scraper.log'))
 file_handler = logging.FileHandler(log_file, encoding='utf-8')
 file_handler.setLevel(logging.ERROR) 
@@ -34,7 +40,6 @@ file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [File:%(filename
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
 
-# 2. 控制台日志：显示进度 (INFO)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
@@ -42,67 +47,86 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 
-def fetch_html_via_node(url, max_retries=3, base_delay=2.0):
+def fetch_html_direct(url, max_retries=3, base_delay=2.0):
+    """
+    直接使用 Python requests 调用 API，替代 Node.js 子进程。
+    适配返回格式: {'source': '<html>...', 'code': 200}
+    """
+    payload = {
+        "url": url,
+        "mode": "source"
+    }
+    
     for attempt in range(1, max_retries + 1):
         try:
-            base_path = get_exe_dir()
-            node_script = os.path.join(base_path, 'node', 'index.js')
-            if not os.path.exists(node_script):
-                node_script = os.path.join(base_path, 'src', 'node', 'index.js')
-            if not os.path.exists(node_script):
-                 node_script = 'src/node/index.js'
+            # 设置较短的连接超时和合理的读取超时
+            response = requests.post(API_URL, json=payload, timeout=(5, 60))
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    
+                    if isinstance(data, dict):
+                        # 检查 code 是否为 200
+                        if data.get('code') == 200:
+                            # 优先获取 source 字段
+                            if 'source' in data:
+                                return data['source']
+                            # 备用：有些接口可能用 data 字段
+                            elif 'data' in data:
+                                return data['data']
+                        else:
+                            logger.error(f"API Logic Error for {url} | Code: {data.get('code')} | Msg: {data}")
+                            # 如果 code 不是 200，视为失败，进入重试
+                            if attempt < max_retries:
+                                time.sleep(base_delay * attempt)
+                            continue
 
-            result = subprocess.run(
-                ['node', node_script, url],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=90 
-            )
-            
-            stdout = result.stdout or ''
-            stderr = result.stderr or ''
-            
-            if result.returncode != 0:
-                logger.error(f"Node process failed for {url} | Stderr: {stderr.strip()}")
-                if attempt < max_retries:
-                    time.sleep(base_delay * attempt)
-                continue
+                    # 如果返回的是字符串
+                    if isinstance(data, str):
+                        return data
+                        
+                    # 兜底：如果解析不出结构，但 HTTP 200，尝试直接返回 response.text
+                    logger.warning(f"Unexpected JSON format for {url}: {str(data)[:100]}")
+                    return response.text
+
+                except json.JSONDecodeError:
+                    # 不是 JSON，直接返回文本
+                    return response.text
+            else:
+                logger.error(f"API Error {response.status_code} for {url} | Response: {response.text[:200]}")
                 
-            if not stdout.strip():
-                logger.error(f"Node returned empty HTML for {url}")
-                if attempt < max_retries:
-                    time.sleep(base_delay * attempt)
-                continue
-
-            return stdout
-
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed for {url} (Attempt {attempt}): {e}")
         except Exception as e:
-            logger.exception(f"Subprocess critical error for {url}: {e}")
+            logger.exception(f"Unexpected error fetching {url}: {e}")
+
+        if attempt < max_retries:
             time.sleep(base_delay * attempt)
-    
+
     return None
 
 def process_store_page(url):
-    """并发任务：处理店铺/列表页"""
     logger.info(f"Processing store page: {url}")
-    html = fetch_html_via_node(url)
+    html = fetch_html_direct(url)
     if html:
         links = extract_product_links(html)
         logger.info(f"Page processed: {url} | Found {len(links)} links")
         return links
     else:
-        # fetch_html_via_node 已经记录了 error，这里只需 info 标记业务流程失败
         return []
 
 def process_product_page(url):
-    """并发任务：处理商品详情页"""
     logger.info(f"Scraping product: {url}")
-    html = fetch_html_via_node(url)
+    html = fetch_html_direct(url)
+    
     if html:
+        # 增加数据校验防止空 HTML 导致解析卡死
+        if len(html) < 100:
+            logger.error(f"HTML too short or invalid for {url}")
+            return {"Product URL": url, "Title": "INVALID_HTML"}
+            
         details = extract_product_details(html, url)
-        # 简单校验数据完整性，如果有严重缺失可以记录 Warning
         if not details.get('Title'):
             logger.warning(f"Product scraped but Title missing: {url}")
         return details
@@ -122,7 +146,7 @@ def main():
         logger.error("No store links found in Excel.")
         return
 
-    logger.info(f"Starting concurrency with MAX_WORKERS={MAX_WORKERS}")
+    logger.info(f"Starting optimized concurrency with MAX_WORKERS={MAX_WORKERS}")
 
     # --- Phase 1: Collecting Product URLs ---
     all_product_urls = set()
@@ -140,7 +164,7 @@ def main():
             for url in store_page_links:
                 future = executor.submit(process_store_page, url)
                 future_to_url[future] = url
-                time.sleep(0.5) # 间隔
+                time.sleep(0.2) 
             
             for future in as_completed(future_to_url):
                 try:
@@ -167,7 +191,7 @@ def main():
         for i, prod_url in enumerate(unique_product_list):
             future = executor.submit(process_product_page, prod_url)
             future_to_url[future] = prod_url
-            time.sleep(0.5) # Python 端提交任务间隔
+            time.sleep(0.2) 
 
         completed_count = 0
         for future in as_completed(future_to_url):
@@ -180,7 +204,7 @@ def main():
                 scraped_data.append({"Product URL": url, "Title": "CRITICAL_ERROR"})
             
             completed_count += 1
-            if completed_count % 5 == 0:
+            if completed_count % 10 == 0:
                 logger.info(f"Progress: {completed_count}/{total_products}")
 
     # --- Phase 3: Save ---
