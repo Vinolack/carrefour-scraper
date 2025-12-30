@@ -59,7 +59,7 @@ def fetch_html_via_node(url, max_retries=3, base_delay=2.0):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=90 # 给 node 脚本多一点时间加载页面
+                timeout=90 
             )
             
             stdout = result.stdout or ''
