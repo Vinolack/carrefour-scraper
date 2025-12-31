@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from typing import Optional
-import configloader
+from src import configloader
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger('carrefour_scraper')

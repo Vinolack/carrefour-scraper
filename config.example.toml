@@ -1,0 +1,8 @@
+default_pages = 1
+IMAGE_HOST_UPLOAD_URL = ""
+IMAGE_TOKEN = ""
+max_concurrent_tasks = 30
+
+[api]
+cf_host = ""
+cf_port = 3000

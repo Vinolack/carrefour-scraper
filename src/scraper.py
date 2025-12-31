@@ -1,238 +1,158 @@
-import os
-import sys
-import time
 import logging
-import pandas as pd
 import requests
 import json
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import configloader
+from src import configloader
+from src.extractor import extract_product_details, extract_product_links
 
-from excel_reader import read_links_from_excel
-from extractor import extract_product_links, extract_product_details
+# 配置日志
+logger = logging.getLogger('carrefour_scraper')
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    # 容器内路径
+    log_file = "/app/logs/scraper.log"
+    # 简单配置，确保文件存在
+    try:
+        open(log_file, 'a').close()
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.ERROR)
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] - %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except: pass
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
+    logger.addHandler(console_handler)
 
-# 初始化配置
 c = configloader.config()
-MAX_WORKERS = c.get_key("max_concurrent_tasks") or 5 
-
-# 获取 API 配置
+MAX_WORKERS = int(c.get_key("max_concurrent_tasks") or 20)
 api_config = c.get_key("api") or {}
+# 默认回退值，防止启动报错，实际运行时应由配置文件或环境变量提供
 CF_HOST = api_config.get("cf_host", "127.0.0.1")
 CF_PORT = api_config.get("cf_port", 3000)
 API_URL = f"http://{CF_HOST}:{CF_PORT}/cf-clearance-scraper"
 
-def get_exe_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    else:
-        return os.path.dirname(os.path.abspath(__file__))
-
-# --- 日志系统配置 ---
-logger = logging.getLogger('carrefour_scraper')
-logger.setLevel(logging.DEBUG)
-logger.propagate = False
-
-log_file = os.path.normpath(os.path.join(get_exe_dir(), '..', 'scraper.log'))
-file_handler = logging.FileHandler(log_file, encoding='utf-8')
-file_handler.setLevel(logging.ERROR) 
-file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [File:%(filename)s:%(lineno)d] - %(message)s')
-file_handler.setFormatter(file_formatter)
-logger.addHandler(file_handler)
-
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
-console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
-
-
-def fetch_html_direct(url, max_retries=3, base_delay=2.0):
-    """
-    直接使用 Python requests 调用 API
-    """
-    payload = {
-        "url": url,
-        "mode": "source"
-    }
-    
-    for attempt in range(1, max_retries + 1):
+def fetch_html_direct(url, max_retries=3):
+    """调用 Node 服务获取 HTML"""
+    payload = {"url": url, "mode": "source"}
+    for attempt in range(max_retries):
         try:
             response = requests.post(API_URL, json=payload, timeout=(5, 60))
-            
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    if isinstance(data, dict):
-                        if data.get('code') == 200:
-                            if 'source' in data:
-                                return data['source']
-                            elif 'data' in data:
-                                return data['data']
-                        else:
-                            logger.error(f"API Logic Error for {url} | Code: {data.get('code')} | Msg: {data}")
-                            if attempt < max_retries:
-                                time.sleep(base_delay * attempt)
-                            continue
-
-                    if isinstance(data, str):
+                    if isinstance(data, dict) and data.get('code') == 200:
+                        return data.get('source') or data.get('data')
+                    elif isinstance(data, str):
                         return data
-                        
-                    logger.warning(f"Unexpected JSON format for {url}: {str(data)[:100]}")
-                    return response.text
-
-                except json.JSONDecodeError:
+                except: 
                     return response.text
             else:
-                logger.error(f"API Error {response.status_code} for {url} | Response: {response.text[:200]}")
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed for {url} (Attempt {attempt}): {e}")
+                logger.error(f"API Error {response.status_code} for {url}")
         except Exception as e:
-            logger.exception(f"Unexpected error fetching {url}: {e}")
-
-        if attempt < max_retries:
-            time.sleep(base_delay * attempt)
-
+            logger.error(f"Fetch error {url}: {e}")
+            time.sleep(1)
     return None
 
 def process_store_page(url):
-    logger.info(f"Processing store page: {url}")
+    """[Store阶段] 抓取店铺页，提取商品链接"""
     html = fetch_html_direct(url)
     if html:
-        links = extract_product_links(html)
-        logger.info(f"Page processed: {url} | Found {len(links)} links")
-        return links
-    else:
-        return []
+        return extract_product_links(html)
+    return []
 
 def process_product_page(url):
-    logger.info(f"Scraping product: {url}")
+    """[Product阶段] 抓取商品详情"""
     html = fetch_html_direct(url)
-    
-    if html:
-        if len(html) < 100:
-            logger.error(f"HTML too short or invalid for {url}")
-            return {"Product URL": url, "Title": "INVALID_HTML"}
-            
-        details = extract_product_details(html, url)
-        if not details.get('Title'):
-            logger.warning(f"Product scraped but Title missing: {url}")
-        return details
-    else:
-        return {"Product URL": url, "Title": "FETCH_FAILED"}
+    if not html or len(html) < 100:
+        return {"Product URL": url, "error": "Fetch failed or empty"}
+    try:
+        return extract_product_details(html, url)
+    except Exception as e:
+        logger.error(f"Extraction error {url}: {e}")
+        return {"Product URL": url, "error": str(e)}
 
-def main():
-    exe_folder = get_exe_dir()
-    excel_file_path = os.path.join(exe_folder, "..", "input_links.xlsx")
-    if not os.path.exists(excel_file_path):
-        excel_file_path = "input_links.xlsx"
+def run_batch_job(task_type: str, urls: list, pages: int, job_store: dict, job_id: str):
+    """后台任务主逻辑"""
+    
+    target_product_urls = []
+    
+    # --- 阶段 1: 如果是店铺，先收集商品链接 ---
+    if task_type == "store":
+        job_store[job_id]["status"] = "scanning_pages"
+        
+        # 1. 生成所有分页链接
+        store_pages_to_scrape = []
+        for url in urls:
+            for p in range(1, pages + 1):
+                # 拼接分页参数
+                sep = "&" if "?" in url else "?"
+                p_url = f"{url}{sep}noRedirect=1&page={p}"
+                store_pages_to_scrape.append(p_url)
+        
+        total_pages = len(store_pages_to_scrape)
+        job_store[job_id]["progress"] = f"Scanning 0/{total_pages} store pages"
+        logger.info(f"Task {job_id}: Scanning {total_pages} store pages...")
 
-    logger.info(f"Reading store links from: {excel_file_path}")
-    store_links = read_links_from_excel(excel_file_path)
-    
-    if not store_links:
-        logger.error("No store links found in Excel.")
-        return
-
-    logger.info(f"Starting optimized concurrency with MAX_WORKERS={MAX_WORKERS}")
-
-    # --- Phase 1: Collecting Product URLs ---
-    all_product_urls = set()
-    logger.info("--- Phase 1: Collecting Product URLs ---")
-    
-    direct_product_links = [l.strip() for l in store_links if "/p/" in l.strip()]
-    store_page_links = [l.strip() for l in store_links if "/p/" not in l.strip()]
-    
-    for l in direct_product_links:
-        all_product_urls.add(l)
-    
-    if store_page_links:
+        found_links = set()
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_url = {}
-            for url in store_page_links:
-                future = executor.submit(process_store_page, url)
-                future_to_url[future] = url
-                time.sleep(0.2) 
+            future_to_url = {executor.submit(process_store_page, u): u for u in store_pages_to_scrape}
             
+            count = 0
             for future in as_completed(future_to_url):
+                count += 1
                 try:
                     links = future.result()
-                    for l in links:
-                        all_product_urls.add(l)
+                    if links:
+                        found_links.update(links)
                 except Exception as e:
-                    logger.error(f"Exception in store page thread: {e}")
+                    logger.error(f"Store page error: {e}")
+                
+                if count % 5 == 0 or count == total_pages:
+                    job_store[job_id]["progress"] = f"Scanning {count}/{total_pages} pages (Found {len(found_links)} products)"
 
-    unique_product_list = sorted(list(all_product_urls))
-    total_products = len(unique_product_list)
-    logger.info(f"Total unique products found: {total_products}")
+        target_product_urls = list(found_links)
+        logger.info(f"Task {job_id}: Found {len(target_product_urls)} products.")
+        
+    else:
+        # 如果是商品链接，直接使用
+        target_product_urls = urls
 
-    if not unique_product_list:
-        logger.warning("No products found to scrape.")
+    # --- 阶段 2: 抓取商品详情 ---
+    if not target_product_urls:
+        job_store[job_id]["status"] = "completed"
+        job_store[job_id]["progress"] = "No products found"
+        job_store[job_id]["completed_at"] = datetime.now().isoformat()
         return
 
-    # --- Phase 2: Scraping Product Details ---
-    scraped_data = []
-    logger.info("--- Phase 2: Scraping Product Details ---")
+    job_store[job_id]["status"] = "scraping_products"
+    total_products = len(target_product_urls)
+    results = []
+    
+    logger.info(f"Task {job_id}: Scraping {total_products} products details...")
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {}
-        for i, prod_url in enumerate(unique_product_list):
-            future = executor.submit(process_product_page, prod_url)
-            future_to_url[future] = prod_url
-            time.sleep(0.2) 
-
-        completed_count = 0
+        future_to_url = {executor.submit(process_product_page, u): u for u in target_product_urls}
+        
+        count = 0
         for future in as_completed(future_to_url):
-            url = future_to_url[future]
+            count += 1
             try:
                 data = future.result()
-                scraped_data.append(data)
+                results.append(data)
             except Exception as e:
-                logger.error(f"Critical error processing product {url}: {e}")
-                scraped_data.append({"Product URL": url, "Title": "CRITICAL_ERROR"})
+                logger.error(f"Product error: {e}")
             
-            completed_count += 1
-            if completed_count % 10 == 0:
-                logger.info(f"Progress: {completed_count}/{total_products}")
+            # 实时更新进度和结果
+            if count % 2 == 0 or count == total_products:
+                job_store[job_id]["progress"] = f"Scraping {count}/{total_products} products"
+                job_store[job_id]["results"] = results
+                job_store[job_id]["results_count"] = len(results)
 
-    # --- Phase 3: Save ---
-    if scraped_data:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        output_filename = f"carrefour_products_{timestamp}.xlsx"
-        output_path = os.path.join(exe_folder, "..", output_filename)
-        if not os.path.exists(os.path.dirname(output_path)):
-             output_path = output_filename
-
-        logger.info(f"Saving {len(scraped_data)} rows to {output_path}")
-        
-        try:
-            df = pd.DataFrame(scraped_data)
-            # [修改] 更新列顺序，加入 Seller 和跟卖信息
-            columns_order = [
-                "Product URL", "EAN", "Brand", "Title", "Category", 
-                "Price", "Shipping Cost", "Seller", 
-                "more_seller1", "price1", "shipping1",
-                "more_seller2", "price2", "shipping2",
-                "more_seller3", "price3", "shipping3",
-                "Description", 
-                "Image 1", "Image 2", "Image 3", "Image 4", "Image 5"
-            ]
-            for col in columns_order:
-                if col not in df.columns: df[col] = ""
-            df = df[columns_order]
-            df.to_excel(output_path, index=False)
-            logger.info("Successfully saved Excel file.")
-        except Exception as e:
-            logger.error(f"Failed to save Excel: {e}")
-            try:
-                csv_path = output_path.replace('.xlsx', '.csv')
-                df.to_csv(csv_path, index=False)
-                logger.info(f"Saved to CSV backup: {csv_path}")
-            except Exception as csv_e:
-                logger.error(f"Failed to save CSV backup: {csv_e}")
-    else:
-        logger.warning("No data extracted to save.")
-
-if __name__ == "__main__":
-    main()
+    job_store[job_id]["status"] = "completed"
+    job_store[job_id]["completed_at"] = datetime.now().isoformat()
