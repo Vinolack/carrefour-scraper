@@ -344,8 +344,47 @@ def extract_product_details(html_content, product_url, mode="full"):
             if m: data['Title'] = remove_html_tags(m.group(1))
         except: pass
     
-    if not state_data or not data['Price']:
-        # 返回一个带有错误的字典，或者抛出异常让 scraper 重试
-        return {"error": "Incomplete data: JSON missing or Price not found", "Product URL": product_url}
+    # Fallback Price
+    if not data['Price']:
+        try:
+            m = re.search(r'itemprop="price"[^>]*content="([\d\.]+)"', html_content)
+            if m: data['Price'] = format_price(m.group(1))
+        except: pass
+
+    # === 修改开始：数据校验与过滤 ===
+
+    # 1. 基础完整性校验 (适用于所有模式)
+    # 必须解析出 JSON (state_data) 或者至少必须有价格，否则视为无效抓取
+    if not state_data and not data['Price']:
+        return {
+            "Product URL": product_url,
+            "error": "Critical: JSON parsing failed AND Price missing"
+        }
+
+    # 2. 模式特定处理
+    if mode == "price_check":
+        # 校验：price_check 模式必须包含 Seller 信息
+        if not data['Price'] or not data['Seller']:
+             return {
+                "Product URL": product_url,
+                "error": "Incomplete data for price_check: Missing Price or Seller"
+            }
+        
+        # 过滤：只返回指定字段
+        return {
+            "Product URL": data["Product URL"],
+            "Price": data["Price"],
+            "Shipping Cost": data["Shipping Cost"],
+            "Seller": data["Seller"]
+        }
+    
+    # full 模式的校验
+    if mode == "full":
+        # full 模式通常需要更严格的校验，比如必须有 Title
+        if not data['Title'] or not data['Price']:
+            return {
+                "Product URL": product_url,
+                "error": "Incomplete data for full scan: Missing Title or Price"
+            }
 
     return data

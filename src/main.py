@@ -14,10 +14,25 @@ JOBS_DB: Dict[str, dict] = {}
 @app.post("/tasks", response_model=schemas.TaskSubmitResponse, status_code=202)
 async def submit_task(request: schemas.TaskSubmitRequest, background_tasks: BackgroundTasks):
     """
-    提交抓取任务。
-    - **type**: "product" (商品链接) 或 "store" (店铺链接)
-    - **pages**: 仅当 type="store" 时有效，指定爬取多少页
-    - **urls**: 链接列表
+    **提交抓取任务**
+
+    根据 `type` 参数的不同，执行不同的抓取策略：
+
+    * **product**: 抓取商品完整详情。
+        * **返回字段**: 包含标题、描述、EAN、品牌、分类、高清图片链接 (Image 1-5)、最低价、卖家信息及竞品比价。
+        * **价格策略**: 提取全网最低价 (Best Price)。
+    
+    * **price_check**: 快速价格监测模式。
+        * **返回字段**: 仅包含 `Product URL`, `Price`, `Shipping Cost`, `Seller`。
+        * **价格策略**: 提取页面当前展示价 。
+
+    * **store**: 店铺/分类遍历模式。
+        * **功能**: 遍历指定的分类或店铺链接，翻页抓取所有商品的 URL。
+        * **参数**: 需结合 `pages` 参数使用。
+
+    **参数说明**:
+    - `urls`: 目标链接列表 (商品链接或店铺链接)。
+    - `pages`: (仅 store 模式) 翻页数量。
     """
     if not request.urls:
         raise HTTPException(status_code=400, detail="URL list cannot be empty")
