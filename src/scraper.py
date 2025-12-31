@@ -272,6 +272,7 @@ def run_batch_job(task_type: str, urls: list, pages: int, job_store: dict, job_i
                     # 传入 shared_counter 和 scrape_mode
                     f = executor.submit(process_batch_products, batch, THREAD_LIMIT, shared_counter, scrape_mode)
                     futures.append(f)
+                    time.sleep(0.3)  # 避免瞬间提交过多任务
                 
                 for future in as_completed(futures):
                     try:
