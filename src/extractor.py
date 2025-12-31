@@ -239,13 +239,21 @@ def extract_product_details(html_content, product_url):
                 img_paths = attributes.get('images', {}).get('paths', [])
                 target_imgs = img_paths[:5]
                 if target_imgs:
-                    for i, img_url in enumerate(target_imgs):
-                        try:
-                            _, url = process_single_image(i, img_url)
-                            if url:
-                                data[f'Image {i+1}'] = url
-                        except Exception as img_e:
-                            logger.error(f"Error processing image {i} for {product_url}: {img_e}")
+                    # 并行下载图片，提高单个商品处理速度
+                    with ThreadPoolExecutor(max_workers=len(target_imgs)) as img_executor:
+                        future_to_index = {
+                            img_executor.submit(process_single_image, i, img_url): i 
+                            for i, img_url in enumerate(target_imgs)
+                        }
+                        
+                        for future in as_completed(future_to_index):
+                            idx = future_to_index[future]
+                            try:
+                                _, url = future.result()
+                                if url:
+                                    data[f'Image {idx+1}'] = url
+                            except Exception as img_e:
+                                logger.error(f"Error processing image {idx} for {product_url}: {img_e}")
 
                 # --- Prices, Seller and Competitors ---
                 selected_offer_id = attributes.get('offerServiceId')

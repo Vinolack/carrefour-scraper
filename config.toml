@@ -1,8 +1,15 @@
 default_pages = 1
-IMAGE_HOST_UPLOAD_URL = "http://38.135.29.32:8080/api/index.php"
+IMAGE_HOST_UPLOAD_URL = "http://10.85.3.167:8080/api/index.php"
 IMAGE_TOKEN = "469e32648194ea9dc4e159ff25e5c61e"
-max_concurrent_tasks = 20
+MAX_WORKERS = 3
+THREAD_LIMIT = 15
 
 [api]
-cf_host = "100.100.226.4"
+cf_host = "10.85.3.129"
 cf_port = 3000
+
+[proxy]
+PROXY_HOST = "50.116.42.151"
+PROXY_PORT = 7778
+PROXY_USER_BASE = "B_56629_US___10_"
+PROXY_PASS = "123456"
