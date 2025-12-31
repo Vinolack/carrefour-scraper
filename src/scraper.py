@@ -127,13 +127,35 @@ def process_batch_products(urls, thread_limit, shared_counter, mode="full"):
     return results, errors
 
 def process_single_product_page(url, mode="full"):
-    try:
-        html = fetch_html_direct(url)
-        if not html or len(html) < 100:
-            return {"Product URL": url, "error": "Fetch failed or empty"}
-        return extract_product_details(html, url, mode=mode)
-    except Exception as e:
-        return {"Product URL": url, "error": str(e)}
+    max_business_retries = 3  # 业务级重试次数
+    
+    for attempt in range(max_business_retries):
+        try:
+            # 1. 获取 HTML 
+            html = fetch_html_direct(url)
+            
+            if not html or len(html) < 500: # 增加长度检查，防止空页面
+                raise ValueError("Empty or too short HTML")
+
+            # 2. 解析数据
+            result = extract_product_details(html, url, mode=mode)
+            
+            # 3. 检查解析结果是否包含错误标记 
+            if "error" in result:
+                logger.warning(f"Data incomplete for {url} (Attempt {attempt+1}): {result['error']}")
+                # 强制轮换代理 
+                time.sleep(random.uniform(2, 5)) # 避让一下
+                continue # 重试
+            
+            # 4. 成功，返回数据
+            return result
+
+        except Exception as e:
+            logger.error(f"Error processing {url} (Attempt {attempt+1}): {e}")
+            time.sleep(1)
+    
+    # 所有重试都失败，返回包含错误信息的字典
+    return {"Product URL": url, "error": "Failed to extract valid data after retries"}
 
 # --- Store Phase Functions (Unchanged logic, simpler signature) ---
 def process_batch_store_pages(urls, thread_limit):

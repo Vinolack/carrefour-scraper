@@ -179,6 +179,7 @@ def extract_product_details(html_content, product_url, mode="full"):
         "more_seller3": "", "price3": "", "shipping3": "",
     }
     
+    is_valid_parse = False
     # 仅 full 模式才预留图片字段
     if mode == "full":
         data.update({"Image 1": "", "Image 2": "", "Image 3": "", "Image 4": "", "Image 5": ""})
@@ -204,6 +205,7 @@ def extract_product_details(html_content, product_url, mode="full"):
                 json_str = html_content[value_start:script_end_idx].strip()
                 if json_str.endswith(';'): json_str = json_str[:-1]
                 state_data = json.loads(json_str)
+                is_valid_parse = True
     except Exception as e:
         logger.error(f"Error extracting JSON for {product_url}: {e}")
 
@@ -342,11 +344,8 @@ def extract_product_details(html_content, product_url, mode="full"):
             if m: data['Title'] = remove_html_tags(m.group(1))
         except: pass
     
-    # Fallback Price usually is the main price metadata, acceptable for both modes
-    if not data['Price']:
-        try:
-            m = re.search(r'itemprop="price"[^>]*content="([\d\.]+)"', html_content)
-            if m: data['Price'] = format_price(m.group(1))
-        except: pass
+    if not state_data or not data['Price']:
+        # 返回一个带有错误的字典，或者抛出异常让 scraper 重试
+        return {"error": "Incomplete data: JSON missing or Price not found", "Product URL": product_url}
 
     return data
