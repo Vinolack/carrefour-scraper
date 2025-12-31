@@ -29,6 +29,8 @@ async def submit_task(request: schemas.TaskSubmitRequest, background_tasks: Back
         "task_id": job_id,
         "status": "pending",
         "progress": "Initializing...",
+        "processed": 0,
+        "total": 0,
         "created_at": datetime.now().isoformat(),
         "results_count": 0,
         "results": []
@@ -54,7 +56,16 @@ async def submit_task(request: schemas.TaskSubmitRequest, background_tasks: Back
 async def get_task_status(task_id: str):
     if task_id not in JOBS_DB:
         raise HTTPException(status_code=404, detail="Task not found")
-    return JOBS_DB[task_id]
+    
+    task_data = JOBS_DB[task_id]
+    
+    # 减少传输量，未完成时不返回 results 列表
+    # 创建副本以避免修改原始内存数据
+    response_data = task_data.copy()
+    if task_data["status"] not in ["completed", "failed"]:
+        response_data["results"] = None
+        
+    return response_data
 
 @app.get("/health")
 def health_check():

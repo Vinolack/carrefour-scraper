@@ -32,7 +32,9 @@ class TaskStatusResponse(BaseModel):
     task_id: str
     status: str  # pending, scanning_pages, scraping_products, completed, failed
     progress: str # 描述性进度文本
+    processed: int = 0 # 已处理数量
+    total: int = 0     # 总数量
     created_at: str
     completed_at: Optional[str] = None
     results_count: int = 0
-    results: List[Dict[str, Any]] = []
+    results: Optional[List[Dict[str, Any]]] = None # 可选，未完成时不返回
