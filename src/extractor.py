@@ -351,7 +351,7 @@ def extract_product_details(html_content, product_url, mode="full"):
             if m: data['Price'] = format_price(m.group(1))
         except: pass
 
-    # === 修改开始：数据校验与过滤 ===
+    # === 数据校验与过滤 ===
 
     # 1. 基础完整性校验 (适用于所有模式)
     # 必须解析出 JSON (state_data) 或者至少必须有价格，否则视为无效抓取
