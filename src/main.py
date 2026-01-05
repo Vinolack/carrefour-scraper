@@ -18,28 +18,23 @@ async def submit_task(request: schemas.TaskSubmitRequest, background_tasks: Back
 
     根据 `type` 参数的不同，执行不同的抓取策略：
 
-    * **product**: 抓取商品完整详情。
-        * **返回字段**: 包含标题、描述、EAN、品牌、分类、高清图片链接 (Image 1-5)、最低价、卖家信息及竞品比价。
-        * **价格策略**: 提取全网最低价 (Best Price)。
+    * **product**: 抓取商品完整详情 (包含图片、描述等)。
     
-    * **price_check**: 快速价格监测模式。
-        * **返回字段**: 仅包含 `Product URL`, `Price`, `Shipping Cost`, `Seller`。
-        * **价格策略**: 提取页面当前展示价 。
+    * **repricing** : 改价采集模式。
+        * **策略**: 提取当前页面**最低价**。
+        * **返回**: URL, 最低价(Price), 运费, 店铺, 以及价格排序第2、第3的竞品信息。
+        
+    * **listing_price** : 上架价格采集模式。
+        * **策略**: 提取当前页面**最低价**。
+        * **返回**: 仅包含 URL, 最低价(Price), 运费, 店铺。
 
     * **store**: 店铺/分类遍历模式。
-        * **功能**: 遍历指定的分类或店铺链接，翻页抓取所有商品的 URL。
-        * **参数**: 需结合 `pages` 参数使用。
-
-    **参数说明**:
-    - `urls`: 目标链接列表 (商品链接或店铺链接)。
-    - `pages`: (仅 store 模式) 翻页数量。
     """
     if not request.urls:
         raise HTTPException(status_code=400, detail="URL list cannot be empty")
 
     job_id = str(uuid.uuid4())
     
-    # 初始化状态
     JOBS_DB[job_id] = {
         "task_id": job_id,
         "status": "pending",
@@ -51,7 +46,6 @@ async def submit_task(request: schemas.TaskSubmitRequest, background_tasks: Back
         "results": []
     }
 
-    # 提交到后台执行
     background_tasks.add_task(
         scraper.run_batch_job, 
         request.type, 
@@ -73,9 +67,6 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     
     task_data = JOBS_DB[task_id]
-    
-    # 减少传输量，未完成时不返回 results 列表
-    # 创建副本以避免修改原始内存数据
     response_data = task_data.copy()
     if task_data["status"] not in ["completed", "failed"]:
         response_data["results"] = None

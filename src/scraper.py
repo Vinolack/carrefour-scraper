@@ -103,13 +103,10 @@ def init_worker():
     setup_logging()
 
 def process_batch_products(urls, thread_limit, shared_counter, mode="full"):
-    """
-    shared_counter: multiprocessing.Manager.Value，用于实时计数
-    mode: "full" or "price_check"
-    """
     results = []
     errors = 0
     with ThreadPoolExecutor(max_workers=thread_limit) as executor:
+        # 这里直接透传 mode
         future_to_url = {executor.submit(process_single_product_page, u, mode): u for u in urls}
         for future in as_completed(future_to_url):
             try:
@@ -120,41 +117,32 @@ def process_batch_products(urls, thread_limit, shared_counter, mode="full"):
             except: 
                 errors += 1
             finally:
-                # 每处理完一个链接，立即增加计数器
-                # Manager Value 是进程安全的
                 shared_counter.value += 1
                 
     return results, errors
 
 def process_single_product_page(url, mode="full"):
-    max_business_retries = 3  # 业务级重试次数
-    
+    max_business_retries = 3
     for attempt in range(max_business_retries):
         try:
-            # 1. 获取 HTML 
             html = fetch_html_direct(url)
-            
-            if not html or len(html) < 500: # 增加长度检查，防止空页面
+            if not html or len(html) < 500:
                 raise ValueError("Empty or too short HTML")
 
-            # 2. 解析数据
+            # 调用 extractor 时传入 mode
             result = extract_product_details(html, url, mode=mode)
             
-            # 3. 检查解析结果是否包含错误标记 
             if "error" in result:
-                logger.warning(f"Data incomplete for {url} (Attempt {attempt+1}): {result['error']}")
-                # 强制轮换代理 
-                time.sleep(random.uniform(2, 5)) # 避让一下
-                continue # 重试
+                logger.warning(f"Data incomplete for {url} ({mode}): {result['error']}")
+                time.sleep(random.uniform(2, 5))
+                continue
             
-            # 4. 成功，返回数据
             return result
 
         except Exception as e:
-            logger.error(f"Error processing {url} (Attempt {attempt+1}): {e}")
+            logger.error(f"Error processing {url}: {e}")
             time.sleep(1)
     
-    # 所有重试都失败，返回包含错误信息的字典
     return {"Product URL": url, "error": "Failed to extract valid data after retries"}
 
 # --- Store Phase Functions (Unchanged logic, simpler signature) ---
@@ -261,9 +249,12 @@ def run_batch_job(task_type: str, urls: list, pages: int, job_store: dict, job_i
     job_store[job_id]["processed"] = 0
     
     # 确定模式
-    scrape_mode = "price_check" if task_type == "price_check" else "full"
-    status_text = "Checking prices..." if scrape_mode == "price_check" else "Scraping details..."
-    job_store[job_id]["progress"] = status_text
+    if task_type in ["price_check", "repricing", "listing_price"]:
+        scrape_mode = task_type
+    else:
+        scrape_mode = "full"
+        
+    job_store[job_id]["progress"] = f"Processing ({scrape_mode})..."
     
     chunk_size = math.ceil(total_products / MAX_WORKERS)
     if chunk_size < 1: chunk_size = 1

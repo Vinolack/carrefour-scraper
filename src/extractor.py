@@ -166,21 +166,21 @@ def process_single_image(index, img_url):
 
 def extract_product_details(html_content, product_url, mode="full"):
     """
-    mode="full": 提取所有信息（含图片），Price 为最低价。
-    mode="price_check": 仅提取价格/卖家，Price 为页面真实价（BuyBox）。
+    mode 支持:
+    - "full": 完整详情，Price为最低价。
+    - "repricing": 改价采集，Price为最低价，包含Rank 2, Rank 3竞品。
+    - "listing_price": 上架采集，Price为最低价，不含竞品。
     """
     data = {
         "Product URL": product_url,
         "Category": "", "Title": "", "Description": "",
         "Price": "", "Shipping Cost": "", "Brand": "", "EAN": "",
         "Seller": "",
-        "more_seller1": "", "price1": "", "shipping1": "",
-        "more_seller2": "", "price2": "", "shipping2": "",
-        "more_seller3": "", "price3": "", "shipping3": "",
+        "more_seller1": "", "price1": "", "shipping1": "", # Rank 2
+        "more_seller2": "", "price2": "", "shipping2": "", # Rank 3
+        "more_seller3": "", "price3": "", "shipping3": "", # Rank 4
     }
     
-    is_valid_parse = False
-    # 仅 full 模式才预留图片字段
     if mode == "full":
         data.update({"Image 1": "", "Image 2": "", "Image 3": "", "Image 4": "", "Image 5": ""})
 
@@ -295,56 +295,85 @@ def extract_product_details(html_content, product_url, mode="full"):
                             })
                     except: pass
 
-                # Find Main Offer (BuyBox)
-                main_offer = None
-                if selected_offer_id:
-                    for o in parsed_offers:
-                        if o['id'] == selected_offer_id:
-                            main_offer = o
-                            break
-                if not main_offer and parsed_offers:
-                    main_offer = parsed_offers[0]
                 
-                # Fill Seller info
-                if main_offer:
-                    data['Seller'] = main_offer['seller']
-                    data['Shipping Cost'] = format_price(main_offer['shipping']) if main_offer['shipping'] > 0 else "0.00€"
+                # === 核心逻辑分支 ===
+                
+                # 1. 对所有 offer 按价格排序 (低 -> 高)
+                all_sorted_offers = sorted(parsed_offers, key=lambda x: x['price'])
+                
+                # 2. 根据模式填充数据
+                
+                if mode in ["repricing", "listing_price"]:
+                    # 这两种模式都需要 "当前页最低价"
+                    if all_sorted_offers:
+                        best_offer = all_sorted_offers[0]
+                        data['Price'] = format_price(best_offer['price'])
+                        data['Seller'] = best_offer['seller']
+                        data['Shipping Cost'] = format_price(best_offer['shipping']) if best_offer['shipping'] > 0 else "0.00€"
+                        
+                        # repricing 模式需要额外的竞品信息
+                        if mode == "repricing":
+                            # Rank 2 (Price 2)
+                            if len(all_sorted_offers) > 1:
+                                o = all_sorted_offers[1]
+                                data['more_seller1'] = o['seller']
+                                data['price1'] = format_price(o['price'])
+                                data['shipping1'] = format_price(o['shipping']) if o['shipping'] > 0 else "0.00€"
+                            
+                            # Rank 3 (Price 3)
+                            if len(all_sorted_offers) > 2:
+                                o = all_sorted_offers[2]
+                                data['more_seller2'] = o['seller']
+                                data['price2'] = format_price(o['price'])
+                                data['shipping2'] = format_price(o['shipping']) if o['shipping'] > 0 else "0.00€"
+                                
+                            # Rank 4 (如果需要更多)
+                            if len(all_sorted_offers) > 3:
+                                o = all_sorted_offers[3]
+                                data['more_seller3'] = o['seller']
+                                data['price3'] = format_price(o['price'])
+                                data['shipping3'] = format_price(o['shipping']) if o['shipping'] > 0 else "0.00€"
 
-                # === Price Logic Distinction ===
-                if parsed_offers:
-                    min_price_val = min(o['price'] for o in parsed_offers)
+                # elif mode == "price_check":
+
+                #     selected_id = attributes.get('offerServiceId')
+                #     main_offer = None
+                #     for o in parsed_offers:
+                #         if o['id'] == selected_id:
+                #             main_offer = o
+                #             break
+                #     if not main_offer and parsed_offers: main_offer = parsed_offers[0]
                     
-                    if mode == "price_check":
-                        # price_check 模式：取页面真实价 (BuyBox)
-                        if main_offer:
-                            data['Price'] = format_price(main_offer['price'])
-                        else:
-                            data['Price'] = "None"
-                    else:
-                        # full 模式：取比价后的最低价
-                        data['Price'] = format_price(min_price_val)
+                #     if main_offer:
+                #         data['Price'] = format_price(main_offer['price'])
+                #         data['Seller'] = main_offer['seller']
+                #         data['Shipping Cost'] = format_price(main_offer['shipping']) if main_offer['shipping'] > 0 else "0.00€"
 
-                # Competitors (Same for both modes, as requested)
-                other_offers = [o for o in parsed_offers if o['id'] != selected_offer_id]
-                other_offers.sort(key=lambda x: x['price'])
-                for i in range(min(3, len(other_offers))):
-                    offer = other_offers[i]
-                    idx = i + 1
-                    data[f'more_seller{idx}'] = offer['seller']
-                    data[f'price{idx}'] = format_price(offer['price'])
-                    data[f'shipping{idx}'] = format_price(offer['shipping']) if offer['shipping'] > 0 else "0.00€"
+                else: # full mode
+                    # Full 模式：Price 取最低价，Competitors 取排除 BuyBox 后的列表
+                    if parsed_offers:
+                        data['Price'] = format_price(all_sorted_offers[0]['price'])
+                        # Find Main Offer (BuyBox)
+                        main_offer = None
+                        if selected_offer_id:
+                            for o in parsed_offers:
+                                if o['id'] == selected_offer_id:
+                                    main_offer = o
+                                    break
+                        if not main_offer and parsed_offers:
+                            main_offer = parsed_offers[0]
+                        
+                        # Fill Seller info
+                        if main_offer:
+                            data['Seller'] = main_offer['seller']
+                            data['Shipping Cost'] = format_price(main_offer['shipping']) if main_offer['shipping'] > 0 else "0.0€"
+        
+
 
         except Exception as e:
             logger.error(f"Parsing error: {e}")
 
     # Fallback (Regex)
-    if not data['Title']:
-        try:
-            m = re.search(r'<h1[^>]*>(.*?)</h1>', html_content, re.IGNORECASE|re.DOTALL)
-            if m: data['Title'] = remove_html_tags(m.group(1))
-        except: pass
-    
-    # Fallback Price
     if not data['Price']:
         try:
             m = re.search(r'itemprop="price"[^>]*content="([\d\.]+)"', html_content)
@@ -354,37 +383,35 @@ def extract_product_details(html_content, product_url, mode="full"):
     # === 数据校验与过滤 ===
 
     # 1. 基础完整性校验 (适用于所有模式)
-    # 必须解析出 JSON (state_data) 或者至少必须有价格，否则视为无效抓取
-    if not state_data and not data['Price']:
+    if not data['Price']:
+         return {"Product URL": product_url, "error": "Price missing"}
+
+    if mode == "listing_price":
         return {
             "Product URL": product_url,
-            "error": "Critical: JSON parsing failed AND Price missing"
-        }
-
-    # 2. 模式特定处理
-    if mode == "price_check":
-        # 校验：price_check 模式必须包含 Seller 信息
-        if not data['Price'] or not data['Seller']:
-             return {
-                "Product URL": product_url,
-                "error": "Incomplete data for price_check: Missing Price or Seller"
-            }
-        
-        # 过滤：只返回指定字段
-        return {
-            "Product URL": data["Product URL"],
             "Price": data["Price"],
             "Shipping Cost": data["Shipping Cost"],
             "Seller": data["Seller"]
         }
-    
-    # full 模式的校验
-    if mode == "full":
-        # full 模式通常需要更严格的校验，比如必须有 Title
-        if not data['Title'] or not data['Price']:
-            return {
-                "Product URL": product_url,
-                "error": "Incomplete data for full scan: Missing Title or Price"
-            }
+        
+    if mode == "repricing":
+        res = {
+            "Product URL": product_url,
+            "Price": data["Price"], # 最低价
+            "Shipping Cost": data["Shipping Cost"],
+            "Seller": data["Seller"],
+            # 价格2 (Rank 2)
+            "price2": data["price1"], "shipping2": data["shipping1"], "more_seller2": data["more_seller1"],
+            # 价格3 (Rank 3)
+            "price3": data["price2"], "shipping3": data["shipping2"], "more_seller3": data["more_seller2"]
+        }
+
+        return {
+             "Product URL": product_url,
+             "Price": data["Price"], "Shipping Cost": data["Shipping Cost"], "Seller": data["Seller"],
+             "Price 2": data["price1"], "Shipping 2": data["shipping1"], "Seller 2": data["more_seller1"],
+             "Price 3": data["price2"], "Shipping 3": data["shipping2"], "Seller 3": data["more_seller2"],
+        }
+        
 
     return data
