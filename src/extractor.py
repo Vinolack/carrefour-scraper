@@ -176,9 +176,6 @@ def extract_product_details(html_content, product_url, mode="full"):
         "Category": "", "Title": "", "Description": "",
         "Price": "", "Shipping Cost": "", "Brand": "", "EAN": "",
         "Seller": "",
-        "more_seller1": "", "price1": "", "shipping1": "", # Rank 2
-        "more_seller2": "", "price2": "", "shipping2": "", # Rank 3
-        "more_seller3": "", "price3": "", "shipping3": "", # Rank 4
     }
     
     if mode == "full":
@@ -304,6 +301,7 @@ def extract_product_details(html_content, product_url, mode="full"):
                 # 2. 根据模式填充数据
                 
                 if mode in ["repricing", "listing_price"]:
+                    
                     # 这两种模式都需要 "当前页最低价"
                     if all_sorted_offers:
                         best_offer = all_sorted_offers[0]
@@ -313,6 +311,11 @@ def extract_product_details(html_content, product_url, mode="full"):
                         
                         # repricing 模式需要额外的竞品信息
                         if mode == "repricing":
+                            data.update({        
+                                "more_seller1": "", "price1": "", "shipping1": "", # Rank 2
+                                "more_seller2": "", "price2": "", "shipping2": "", # Rank 3
+                                "more_seller3": "", "price3": "", "shipping3": "", # Rank 4
+                            })
                             # Rank 2 (Price 2)
                             if len(all_sorted_offers) > 1:
                                 o = all_sorted_offers[1]
