@@ -91,11 +91,12 @@ def fetch_html_direct(url, max_retries=3):
                 except: return response.text
             elif response.status_code in [403, 429, 502, 503, 504]:
                 logger.warning(f"API Fail {response.status_code}. Rotating...")
+                time.sleep(random.uniform(3, 6))
             else:
                 logger.error(f"API Error {response.status_code} for {url}")
         except Exception as e:
             logger.error(f"Conn Error: {e}. Rotating...")
-        time.sleep(1 + attempt)
+        time.sleep(2 + attempt * 2)
     return None
 
 # --- Worker Functions ---
@@ -134,6 +135,7 @@ def process_batch_products(urls, thread_limit, shared_counter, mode="full"):
     return results, errors
 
 def process_single_product_page(url, mode="full"):
+    time.sleep(random.uniform(0.5, 1.5))
     max_business_retries = 3
     for attempt in range(max_business_retries):
         try:
