@@ -111,12 +111,20 @@ def process_batch_products(urls, thread_limit, shared_counter, mode="full"):
         for future in as_completed(future_to_url):
             try:
                 data = future.result()
-                if "error" in data and "Fetch failed" in str(data["error"]):
+                if "error" in data:
+                    # 记录错误日志
+                    logger.error(f"Failed to scrape product: {data.get('Product URL')} | Error: {data.get('error')}")
+                    # 计入错误数，但不加入结果列表
                     errors += 1
-                results.append(data)
-            except: 
+                else:
+                    # 成功获取数据，加入结果列表
+                    results.append(data)
+
+            except Exception as e:
+                logger.error(f"Batch processing exception: {e}") 
                 errors += 1
             finally:
+                # 无论成功失败，计数器都加1，确保处理进度正确
                 shared_counter.value += 1
                 
     return results, errors
