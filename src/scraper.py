@@ -298,6 +298,8 @@ def run_batch_job(task_type: str, urls: list, pages: int, job_store: dict, job_i
         finally:
             # 停止监控线程并做最后一次更新
             stop_monitor.set()
+            if monitor.is_alive():
+                monitor.join()
             job_store[job_id]["processed"] = shared_counter.value
 
     # 失败判定
