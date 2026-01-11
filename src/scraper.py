@@ -118,7 +118,11 @@ def process_batch_products(urls, thread_limit, shared_counter, mode="full"):
                     errors += 1
                 else:
                     # 成功获取数据，加入结果列表
-                    results.append(data)
+                    if "error" in data:
+                        errors += 1
+                    else:
+                        data.pop("error", None) # 确保绝对干净
+                        results.append(data)
 
             except Exception as e:
                 logger.error(f"Batch processing exception: {e}") 
