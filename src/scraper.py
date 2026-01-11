@@ -160,10 +160,54 @@ def process_batch_store_pages(urls, thread_limit):
     return list(found_links), errors
 
 def process_single_store_page(url):
-    try:
-        html = fetch_html_direct(url)
-        if html: return extract_product_links(html)
-    except: pass
+    """
+    处理单个店铺/分类分页链接，增加重试机制以应对软拦截
+    """
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            # 1. 获取 HTML
+            # 在高并发下，适当增加随机延迟，减少瞬间 QPS
+            if attempt > 0:
+                sleep_time = random.uniform(2, 4)
+                logger.info(f"Retrying {url} after {sleep_time:.2f}s (Attempt {attempt+1})...")
+                time.sleep(sleep_time)
+
+            html = fetch_html_direct(url)
+            
+            if not html:
+                continue
+
+            # 2. 尝试提取链接
+            links = extract_product_links(html)
+            
+            if links:
+                # 成功提取到链接，直接返回
+                return links
+            
+            # 3. 结果验证：如果提取为空
+            # 可能是：A. 真的没有商品（比如页码超出了） B. 被拦截（返回了验证码页面）
+            # 策略：如果 HTML 很短，或者包含特定拦截关键字，或者仅仅是空，我们都尝试重试几次
+            
+            # 简单启发式检查：如果 HTML 长度正常但没链接，可能是被软拦截
+            if len(html) > 1000 and "captcha" not in html.lower():
+                pass
+            
+            logger.warning(f"Zero links found for {url} (Attempt {attempt+1}/{max_retries}). Possible soft block.")
+            
+            # 强制让当前线程休息一下，模拟人工停顿
+            time.sleep(random.uniform(1, 3))
+            
+            # 继续下一次循环（重试）
+            continue
+
+        except Exception as e:
+            logger.error(f"Error processing store page {url}: {e}")
+            time.sleep(1)
+    
+    # 所有重试都失败，才返回空列表
+    logger.error(f"Failed to extract links from {url} after {max_retries} attempts.")
     return []
 
 # --- Progress Monitor ---
@@ -211,6 +255,7 @@ def run_batch_job(task_type: str, urls: list, pages: int, job_store: dict, job_i
             for batch in batches:
                 f = executor.submit(process_batch_store_pages, batch, THREAD_LIMIT)
                 future_to_batch_size[f] = len(batch)
+                time.sleep(1)  # 避免瞬间提交过多任务
             
             for future in as_completed(future_to_batch_size):
                 b_size = future_to_batch_size[future]

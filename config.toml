@@ -2,7 +2,7 @@ default_pages = 1
 IMAGE_HOST_UPLOAD_URL = "http://10.85.3.167:8080/api/index.php"
 IMAGE_TOKEN = "469e32648194ea9dc4e159ff25e5c61e"
 MAX_WORKERS = 3
-THREAD_LIMIT = 15
+THREAD_LIMIT = 10
 
 [api]
 cf_host = "10.85.3.129"
