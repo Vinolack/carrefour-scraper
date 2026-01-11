@@ -3,9 +3,9 @@ from typing import List, Optional, Dict, Any, Literal
 
 class TaskSubmitRequest(BaseModel):
 
-    type: Literal["product", "store", "price_check", "repricing", "listing_price"] = Field(
+    type: Literal["product", "store", "repricing", "listing_price"] = Field(
         ..., 
-        description="任务类型：'product'(全量), 'store'(店铺), 'price_check'(BuyBox价), 'repricing'(改价-最低价排行), 'listing_price'(上架-最低价)"
+        description="任务类型：'product'(全量), 'store'(店铺), 'repricing'(改价-最低价排行), 'listing_price'(上架-最低价)"
     )
     urls: List[str] = Field(
         ..., 
