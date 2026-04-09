@@ -274,7 +274,8 @@ def extract_product_details(html_content, product_url, mode="full"):
                         marketplace = o_attrs.get('marketplace')
                         shipping_cost = 0.0
                         seller_name = "Carrefour"
-                        
+                        seller_link = ""
+
                         if marketplace:
                             shipping = marketplace.get('shipping', {})
                             is_free = shipping.get('freeShippingFlag')
@@ -284,11 +285,12 @@ def extract_product_details(html_content, product_url, mode="full"):
                                 cost = shipping.get('defaultShippingCharge')
                                 shipping_cost = float(cost) if cost is not None else 0.0
                             seller_name = marketplace.get('seller', 'Carrefour')
-                        
+                            seller_link = marketplace.get('sellerUrl', '')
+
                         if price is not None:
                             parsed_offers.append({
                                 'id': o_id, 'seller': seller_name,
-                                'price': price, 'shipping': shipping_cost
+                                'price': price, 'shipping': shipping_cost, 'seller_link': seller_link
                             })
                     except: pass
 
@@ -301,20 +303,21 @@ def extract_product_details(html_content, product_url, mode="full"):
                 # 2. 根据模式填充数据
                 
                 if mode in ["repricing", "listing_price"]:
-                    
+
                     # 这两种模式都需要 "当前页最低价"
                     if all_sorted_offers:
                         best_offer = all_sorted_offers[0]
                         data['Price'] = format_price(best_offer['price'])
                         data['Seller'] = best_offer['seller']
                         data['Shipping Cost'] = format_price(best_offer['shipping']) if best_offer['shipping'] > 0 else "0.00€"
-                        
+                        data['Seller Link'] = best_offer.get('seller_link', '')
+
                         # repricing 模式需要额外的竞品信息
                         if mode == "repricing":
-                            data.update({        
-                                "more_seller1": "", "price1": "", "shipping1": "", # Rank 2
-                                "more_seller2": "", "price2": "", "shipping2": "", # Rank 3
-                                "more_seller3": "", "price3": "", "shipping3": "", # Rank 4
+                            data.update({
+                                "more_seller1": "", "price1": "", "shipping1": "", "seller_link1": "", # Rank 2
+                                "more_seller2": "", "price2": "", "shipping2": "", "seller_link2": "", # Rank 3
+                                "more_seller3": "", "price3": "", "shipping3": "", "seller_link3": "", # Rank 4
                             })
                             # Rank 2 (Price 2)
                             if len(all_sorted_offers) > 1:
@@ -322,20 +325,23 @@ def extract_product_details(html_content, product_url, mode="full"):
                                 data['more_seller1'] = o['seller']
                                 data['price1'] = format_price(o['price'])
                                 data['shipping1'] = format_price(o['shipping']) if o['shipping'] > 0 else "0.00€"
-                            
+                                data['seller_link1'] = o.get('seller_link', '')
+
                             # Rank 3 (Price 3)
                             if len(all_sorted_offers) > 2:
                                 o = all_sorted_offers[2]
                                 data['more_seller2'] = o['seller']
                                 data['price2'] = format_price(o['price'])
                                 data['shipping2'] = format_price(o['shipping']) if o['shipping'] > 0 else "0.00€"
-                                
+                                data['seller_link2'] = o.get('seller_link', '')
+
                             # Rank 4 (如果需要更多)
                             if len(all_sorted_offers) > 3:
                                 o = all_sorted_offers[3]
                                 data['more_seller3'] = o['seller']
                                 data['price3'] = format_price(o['price'])
                                 data['shipping3'] = format_price(o['shipping']) if o['shipping'] > 0 else "0.00€"
+                                data['seller_link3'] = o.get('seller_link', '')
 
                 # elif mode == "price_check":
 
@@ -394,26 +400,16 @@ def extract_product_details(html_content, product_url, mode="full"):
             "Product URL": product_url,
             "Price": data["Price"],
             "Shipping Cost": data["Shipping Cost"],
-            "Seller": data["Seller"]
-        }
-        
-    if mode == "repricing":
-        res = {
-            "Product URL": product_url,
-            "Price": data["Price"], # 最低价
-            "Shipping Cost": data["Shipping Cost"],
             "Seller": data["Seller"],
-            # 价格2 (Rank 2)
-            "price2": data["price1"], "shipping2": data["shipping1"], "more_seller2": data["more_seller1"],
-            # 价格3 (Rank 3)
-            "price3": data["price2"], "shipping3": data["shipping2"], "more_seller3": data["more_seller2"]
+            "Seller Link": data.get("Seller Link", "")
         }
 
+    if mode == "repricing":
         return {
              "Product URL": product_url,
-             "Price": data["Price"], "Shipping Cost": data["Shipping Cost"], "Seller": data["Seller"],
-             "Price 2": data["price1"], "Shipping 2": data["shipping1"], "Seller 2": data["more_seller1"],
-             "Price 3": data["price2"], "Shipping 3": data["shipping2"], "Seller 3": data["more_seller2"],
+             "Price": data["Price"], "Shipping Cost": data["Shipping Cost"], "Seller": data["Seller"], "Seller Link": data.get("Seller Link", ""),
+             "Price 2": data["price1"], "Shipping 2": data["shipping1"], "Seller 2": data["more_seller1"], "Seller Link 2": data.get("seller_link1", ""),
+             "Price 3": data["price2"], "Shipping 3": data["shipping2"], "Seller 3": data["more_seller2"], "Seller Link 3": data.get("seller_link2", ""),
         }
         
 
